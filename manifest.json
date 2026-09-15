@@ -4,8 +4,8 @@
     "js": "index.js",
     "css": "style.css",
     "author": "agent-writer",
-    "version": "0.8.23",
-    "homePage": "https://github.com/devilp019/agent-writer",
+    "version": "0.8.24",
+    "homePage": "https://gitee.com/miao077/agent-writer",
     "auto_update": false,
     "minimum_client_version": "1.18.0",
     "hooks": {

@@ -24,7 +24,7 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
-} from './stages.js?v=0.8.23';
+} from './stages.js?v=0.8.24';
 import {
     injectSlot,
     restoreSlot,
@@ -34,7 +34,7 @@ import {
     makePayloadTag,
     takeLastBody,
     recoverSlots,
-} from './tavern.js?v=0.8.23';
+} from './tavern.js?v=0.8.24';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -380,10 +380,24 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
         // 记下原始草稿：调用方据此判断「这一层已经处理过」，避免自动模式循环
         message.extra = { ...(message.extra ?? {}), agent_writer: { draft } };
         message.mes = finalText;
+
+        // ⚠️ 只改**当前这一条 swipe**，绝不能重建整个数组。
+        //
+        // 曾经这里是 `message.swipes = [finalText]; message.swipe_id = 0;`
+        // —— 那会把用户重 roll 出来的所有分支一次性抹掉。用户实测症状：
+        // 重 roll 出 4 条，跑完流水线后计数变成「1/1」。
+        // 那不是删楼层，是 swipes 被清空。
+        //
+        // 正确做法：写回当前正在看的那条，其它分支原样保留。
         if (Array.isArray(message.swipes) && message.swipes.length) {
-            message.swipes = [finalText];
-            message.swipe_id = 0;
-            message.swipe_info = [];
+            const id = Number.isInteger(message.swipe_id) ? message.swipe_id : 0;
+            if (id >= 0 && id < message.swipes.length) {
+                message.swipes[id] = finalText;
+                // swipe_info 与 swipes 一一对应，只清掉这一条，别整个丢掉
+                if (Array.isArray(message.swipe_info) && id < message.swipe_info.length) {
+                    message.swipe_info[id] = null;
+                }
+            }
         }
 
         await context.saveChat?.();
