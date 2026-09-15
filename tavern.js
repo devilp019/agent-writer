@@ -48,12 +48,24 @@ export function probeTavernHelper() {
     return { ok: missing.length === 0, missing, version };
 }
 
+/**
+ * 取酒馆助手，拿不到就抛错。
+ *
+ * 注意：这里是**同步**检查，不等加载。启动时的等待重试在 index.js 的
+ * checkTavernHelper 里做（它会轮询最多 20 秒），所以正常路径上到这里时
+ * 酒馆助手已经在了。
+ *
+ * 没做成 async 是有意的：改了它，injectSlot / restoreSlot / tavernGenerate
+ * 等一串调用点都要跟着改，而收益只是覆盖「页面刚加载完的几秒内就点运行」
+ * 这一个小窗口。那个场景下用户会看到一条明确的报错，能自己重试 ——
+ * 比为一个窄窗口去动整条调用链划算。
+ */
 function requireTh() {
     const probe = probeTavernHelper();
     if (!probe.ok) {
         throw new Error(
             `需要酒馆助手（JS-Slash-Runner）：${probe.missing.join('；')}。`
-            + '请在扩展管理里确认它已安装并启用，然后刷新页面。',
+            + '它可能还在加载，请等几秒后重试；仍不行就到扩展管理里确认它已安装并启用。',
         );
     }
     return th();

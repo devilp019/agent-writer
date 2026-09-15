@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.8.5';
+const VERSION = '0.8.6';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.8.5';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.5';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.5';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.8.6';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.6';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.6';
 import {
     mountPanel,
     unmountPanel,
@@ -27,12 +27,12 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.8.5';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.5';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.5';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.5';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.5';
-import * as notice from './notice.js?v=0.8.5';
+} from './ui/panel.js?v=0.8.6';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.6';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.6';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.6';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.6';
+import * as notice from './notice.js?v=0.8.6';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -391,20 +391,62 @@ function startUI() {
  *
  * ②③ 走的是酒馆助手的 generate()，没它整个流水线都跑不了 ——
  * 所以启动时就要说清楚，而不是等用户点了运行才报错。
+ *
+ * ⚠️ 但**不能只查一次**。酒馆助手的 manifest 里 loading_order 也是 100，
+ * 和本扩展同序号时加载顺序不确定。早先这里同步查一次、查不到就报「缺依赖」
+ * 并且不再重试 —— 如果酒馆助手恰好后加载，就会误报，而且整个扩展都废掉。
+ * 症状还很迷惑：时好时坏，取决于这次刷新谁先加载。
+ *
+ * 所以改成轮询等它出现（和面板挂载那套一样的思路）。
  */
+const TH_WAIT_INTERVAL_MS = 500;
+const TH_WAIT_MAX_MS = 20000;
+let thWaitTimer = null;
+let thReportedMissing = false;
+
 function checkTavernHelper(settings) {
+    if (thWaitTimer) return;
+
     const probe = probeTavernHelper();
-    if (!probe.ok) {
-        log(`✘ ${probe.missing.join('；')}`);
-        console.warn('[AgentWriter] 缺少酒馆助手，②③ 无法运行。请安装并启用 JS-Slash-Runner 扩展。');
-        // 这是硬依赖：没有它 ②③ 一次都跑不了，必须在界面上说清楚
-        notice.error(
-            `缺少酒馆助手（JS-Slash-Runner），②③ 无法运行：\n${probe.missing.join('\n')}`,
-            'Agent Writer 缺依赖',
-        );
+    if (probe.ok) {
+        thReportedMissing = false;
+        reportTavernHelperReady(probe, settings);
         return;
     }
 
+    // 还没出现 —— 等一等再查，别急着报错
+    const startedAt = Date.now();
+    log('等待酒馆助手（JS-Slash-Runner）加载…');
+
+    thWaitTimer = setInterval(() => {
+        const now = probeTavernHelper();
+        if (now.ok) {
+            clearInterval(thWaitTimer);
+            thWaitTimer = null;
+            thReportedMissing = false;
+            log(`✓ 酒馆助手在 ${Math.round((Date.now() - startedAt) / 1000)} 秒后加载完成`);
+            reportTavernHelperReady(now, getSettings());
+            return;
+        }
+        if (Date.now() - startedAt >= TH_WAIT_MAX_MS) {
+            clearInterval(thWaitTimer);
+            thWaitTimer = null;
+            if (thReportedMissing) return;
+            thReportedMissing = true;
+            log(`✘ ${now.missing.join('；')}`);
+            console.warn('[AgentWriter] 等了 20 秒仍未见酒馆助手。请确认 JS-Slash-Runner 已安装并启用。');
+            notice.error(
+                `等了 20 秒仍没等到酒馆助手（JS-Slash-Runner），②③ 无法运行。\n`
+                + `缺：${now.missing.join('；')}\n`
+                + '请到「扩展管理」确认它已安装且处于启用状态，然后刷新页面。',
+                'Agent Writer 缺依赖',
+            );
+        }
+    }, TH_WAIT_INTERVAL_MS);
+}
+
+/** 酒馆助手可用之后的正常检查 */
+function reportTavernHelperReady(probe, settings) {
     const presets = getProxyPresets();
     log(`✓ 酒馆助手可用${probe.version ? `（v${probe.version}）` : ''}；代理预设 ${presets.length} 个`);
 
