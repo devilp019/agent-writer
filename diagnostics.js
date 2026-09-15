@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.15';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.15';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.16';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.16';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.15');
+        const mod = await import('./pipeline.js?v=0.8.16');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.15 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.16 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.15');
+        const mod = await import('./tavern.js?v=0.8.16');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.15 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.16 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1042,6 +1042,140 @@ function describeKeyFields(body, say) {
 }
 
 /**
+ * 真正走 TavernHelper 那条路跑一次，并**截获实际发出的 generate_data**。
+ *
+ * 为什么需要它：probeExact 是「我手写 body → 打酒馆后端」，而真链路是
+ *   custom_api → TavernHelper 编译 → generate_data → 酒馆后端
+ * 这两条**不一定等价**。前面反复出现「诊断通、实跑不通」，根源就在这 ——
+ * 我一直在验证第一条路，而用户在跑第二条。
+ *
+ * 这个函数走第二条：调 tavernGenerate（和流水线同一个函数），同时监听
+ * CHAT_COMPLETION_SETTINGS_READY 把 generate_data 截下来。于是
+ * 「实跑发的是什么」和「它返回什么」都拿到了，不用再推。
+ *
+ * 成功时酒馆助手不往 chat 里写东西（should_silence），所以安全。
+ *
+ * @param {object} stage 单阶段设置
+ */
+export async function probeViaTavernHelper(stage) {
+    const out = [];
+    const say = (s) => { out.push(s); setDiagOutput(out.join('\n')); };
+
+    const context = ctx();
+    if (!context) {
+        setDiagOutput('getContext() 不可用。');
+        return null;
+    }
+
+    let tavern;
+    try {
+        tavern = await import('./tavern.js?v=0.8.16');
+    } catch (e) {
+        setDiagOutput(`读取失败: ${e?.message}`);
+        return null;
+    }
+
+    say('=== 真正走 TavernHelper 跑一次（和流水线同一条路）===');
+    say(`（扩展版本 ${VERSION ?? '?'}）`);
+    say('');
+
+    const probe = tavern.probeTavernHelper?.();
+    say(`酒馆助手可用：${probe?.ok ? `是${probe.version ? `（v${probe.version}）` : ''}` : '否 ← 到这里就断了'}`);
+    if (!probe?.ok) {
+        say(`  缺：${(probe?.missing ?? []).join('；')}`);
+        const t = out.join('\n');
+        setDiagOutput(t);
+        return t;
+    }
+    say('');
+
+    const customApi = tavern.buildCustomApi(stage);
+    say('会把这份 custom_api 交给 TavernHelper：');
+    const shown = { ...customApi };
+    if (shown.custom_include_headers?.Authorization) {
+        shown.custom_include_headers = {
+            ...shown.custom_include_headers,
+            Authorization: redactAuth(shown.custom_include_headers.Authorization),
+        };
+    }
+    say('  ' + JSON.stringify(shown, null, 2).split('\n').join('\n  '));
+    say('');
+
+    // 截获 generate_data
+    let captured = null;
+    let unsub = null;
+    try {
+        const es = context.eventSource;
+        if (es?.on && context.eventTypes?.CHAT_COMPLETION_SETTINGS_READY) {
+            unsub = es.on(context.eventTypes.CHAT_COMPLETION_SETTINGS_READY, (generateData) => {
+                if (generateData?.custom_url || generateData?.custom_include_headers) {
+                    captured = generateData;
+                }
+            });
+        }
+    } catch (e) {
+        say(`挂事件监听失败：${e?.message}`);
+    }
+
+    say('开始调用 tavernGenerate…');
+    const started = Date.now();
+    let result = null;
+    let failure = null;
+    try {
+        result = await tavern.tavernGenerate({ stage, generationId: `aw-probe-${Date.now()}` });
+    } catch (e) {
+        failure = e;
+    } finally {
+        try { unsub?.stop?.(); } catch { /* 忽略 */ }
+    }
+    say(`耗时 ${Date.now() - started}ms`);
+    say('');
+
+    say('--- TavernHelper 编译后实际发出的 generate_data ---');
+    if (!captured) {
+        say('（没截到）可能这次调用没触发 CHAT_COMPLETION_SETTINGS_READY。');
+    } else {
+        say(`custom_url              ${JSON.stringify(captured.custom_url ?? null)}`);
+        const h = captured.custom_include_headers;
+        if (typeof h === 'string') {
+            say(`custom_include_headers  字符串 ${JSON.stringify(redactAuth(h))}`);
+            say(`  "Bearer " 前缀：${/Bearer\s/.test(h) ? '有' : '**没有 ← 问题在这**'}`);
+        } else if (h && typeof h === 'object') {
+            say(`custom_include_headers  对象 ${JSON.stringify({ ...h, Authorization: redactAuth(h.Authorization ?? '') })}`);
+            say(`  "Bearer " 前缀：${/Bearer\s/.test(String(h.Authorization ?? '')) ? '有' : '**没有 ← 问题在这**'}`);
+        } else {
+            say('custom_include_headers  (没有) **← 问题在这**');
+        }
+        const body = captured.custom_include_body;
+        say(`custom_include_body     ${body === undefined ? '(没有)' : `${String(body).length} 字，含 providerOptions：${/providerOptions/.test(String(body)) ? '是' : '否'}`}`);
+        say(`model                   ${JSON.stringify(captured.model ?? null)}`);
+        say(`max_tokens              ${JSON.stringify(captured.max_tokens ?? null)}`);
+        say(`reverse_proxy           ${JSON.stringify(captured.reverse_proxy ?? null)}`);
+        say(`proxy_password          ${captured.proxy_password ? `(有，${String(captured.proxy_password).length} 字)` : '(空)'}`);
+    }
+    say('');
+
+    say('--- 调用结果 ---');
+    if (failure) {
+        say(`✘ 抛错：${failure?.name ?? 'Error'}`);
+        say(`  ${String(failure?.message ?? failure)}`);
+    } else {
+        say(`✔ 返回 ${String(result ?? '').length} 字：${JSON.stringify(String(result ?? '').slice(0, 120))}`);
+    }
+    say('');
+
+    say('=== 判断 ===');
+    say('  · 这里通而实跑不通 ⇒ 差别不在 TavernHelper，去看流水线自己做了什么');
+    say('  · 这里也不通、且上面显示「没有前缀」⇒ 就是它');
+    say('  · 这里也不通、前缀也在 ⇒ 把上面整段发我，这次有实际操作数了');
+
+    const text = out.join('\n');
+    setDiagOutput(text);
+    log('走 TavernHelper 的真实复现完成');
+    return text;
+}
+
+/**
  * 用**面板里真实的参数**复现一次 ② 的请求。
  *
  * 为什么需要它：`probeChannel` 用的是它自己编的参数（temperature 0.3、
@@ -1071,7 +1205,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.15'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.16'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1340,4 +1474,5 @@ export function exposeGlobals() {
     globalThis.awProbeChannel = probeChannel;
     globalThis.awChannelPlan = dumpChannelPlan;
     globalThis.awProbeExact = probeExact;
+    globalThis.awProbeViaTh = probeViaTavernHelper;
 }

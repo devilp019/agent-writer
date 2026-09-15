@@ -126,6 +126,19 @@ function stageDefaults(overrides) {
          */
         bodyFields: {},
 
+        /**
+         * 附加请求体字段的**原文**（面板里那段的原始文本，一字不改）。
+         *
+         * 和 bodyFields 的关系：
+         *   bodyFields    —— 解析后的对象。JSON 写不严格时解析失败，这里是空的。
+         *   bodyFieldsRaw —— 原文。无论严格与否都留着，真正发出去的是它。
+         *
+         * 为什么必须进 schema：它会落盘到 settings.json。不写在这里的话，
+         * 一旦某个环节用 DEFAULT_SETTINGS 去构建阶段对象，原文就会丢 ——
+         * 表现就是「每次装完都得重新填附加参数」。实测踩过。
+         */
+        bodyFieldsRaw: '',
+
         temperature: 1.0,
         maxTokens: 2048,
         useStream: true,

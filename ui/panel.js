@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.15';
+import { demoState } from '../state.js?v=0.8.16';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -311,7 +311,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.15';
+export const VERSION = '0.8.16';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -471,6 +471,11 @@ function bindEvents(el) {
         // 用面板里真实的 temperature / max_tokens / 附加字段复现 ② 的请求 ——
         // 换渠道诊断用的是它自己编的参数，测不出「实跑才失败」这类问题。
         window.awProbeExact?.(readStagesNow());
+    });
+    el.querySelector('#aw-diag-via-th')?.addEventListener('click', () => {
+        // 真正走 TavernHelper（和流水线同一个函数），并截获它发出的 generate_data。
+        // 前面反复「诊断通、实跑不通」，就是因为诊断一直绕过 TavernHelper。
+        window.awProbeViaTh?.(readStagesNow().critic);
     });
     el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
         const model = el.querySelector('#aw-diag-model')?.value ?? '';
@@ -739,6 +744,7 @@ const PANEL_HTML = `
                     <button id="aw-diag-channel" class="aw-btn">换渠道诊断</button>
                     <button id="aw-diag-plan" class="aw-btn">看扩展实际发什么</button>
                     <button id="aw-diag-exact" class="aw-btn">用真实参数复现 ②</button>
+                    <button id="aw-diag-via-th" class="aw-btn">走酒馆助手跑一次（最接近实跑）</button>
                 </div>
                 <label class="aw-field">
                     <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>
