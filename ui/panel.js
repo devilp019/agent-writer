@@ -75,7 +75,7 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         <label class="aw-field">
             <span>附加请求体字段 JSON（顶层字段，provider 私有参数）</span>
             <textarea id="${id('bodyfields')}" rows="3">${esc(JSON.stringify(s.bodyFields ?? {}, null, 2))}</textarea>
-            <em class="aw-tip">例如开思考填 {"thinking":{"type":"enabled"}}。通过 CHAT_COMPLETION_SETTINGS_READY 注入，不走 custom_include_body。</em>
+            <em class="aw-tip">思考开关就在这里（没有下拉框，只能手填）。DeepSeek 官方 API 的写法：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。注意 <code>reasoning_effort</code> 只调「想多久」，不负责开关 —— 想关必须用 thinking。通过 CHAT_COMPLETION_SETTINGS_READY 注入，不走 custom_include_body。</em>
         </label>
 
         <div class="aw-grid">
@@ -662,13 +662,13 @@ const PANEL_HTML = `
 
             <div class="aw-card" id="aw-stage-card-critic">
                 <div class="aw-card-title">② 校验</div>
-                <p class="aw-hint">只找逻辑问题，输出结构化清单；通常开思考。</p>
+                <p class="aw-hint">只找逻辑问题，输出结构化清单 —— <b>这一阶段要开思考</b>。开思考时正文会变啰嗦，所以别指望它写稿；它的产出只是给 ③ 的修改意见。</p>
                 <div id="aw-fields-critic"></div>
             </div>
 
             <div class="aw-card" id="aw-stage-card-final">
                 <div class="aw-card-title">③ 改写</div>
-                <p class="aw-hint">按清单改稿，保住原稿文风；通常关思考。</p>
+                <p class="aw-hint">按清单改稿，保住原稿文风 —— <b>这一阶段要关思考</b>。开思考会让它一边写一边盘算剧情，正文反而不能用。</p>
                 <div id="aw-fields-final"></div>
             </div>
 
