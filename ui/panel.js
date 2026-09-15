@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.10';
+import { demoState } from '../state.js?v=0.8.12';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -116,8 +116,11 @@ function readStage(el, stage, current) {
         const raw = get('bodyfields')?.value ?? '{}';
         const parsed = raw.trim() ? JSON.parse(raw) : {};
         next.bodyFields = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        next.bodyFieldsRaw = raw;
     } catch {
-        // JSON 写坏了就保留原来那份，别把用户刚写的内容丢掉
+        // JSON 写坏了就保留原来那份，别把用户刚写的内容丢掉。
+        // 但把原文留着 —— 诊断要靠它区分「没填」和「填了但解析失败」。
+        next.bodyFieldsRaw = get('bodyfields')?.value ?? '';
         log(`${STAGE_LABELS[stage]} 的附加请求体不是合法 JSON，本次未采纳`);
     }
 
@@ -308,7 +311,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.10';
+export const VERSION = '0.8.12';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -431,9 +434,25 @@ function bindEvents(el) {
     el.querySelector('#aw-diag-secret')?.addEventListener('click', () => {
         window.awProbeSecret?.();
     });
+    /**
+     * 点诊断按钮时现读面板里的两个阶段。
+     *
+     * 为什么不直接用 currentStageState：它靠 input/change 事件更新，
+     * 而那假设「事件一定触发过」。实测踩到过 —— 用户明明填了附加参数，
+     * 诊断里却显示 {}（空）。现从 DOM 读就没有这个假设，
+     * 代价只是多解析几次 JSON。
+     */
+    const readStagesNow = () => {
+        const base = { critic: {}, final: {} };
+        return {
+            critic: readStage(el, 'critic', currentStageState?.critic ?? base.critic),
+            final: readStage(el, 'final', currentStageState?.final ?? base.final),
+        };
+    };
+
     el.querySelector('#aw-diag-channel')?.addEventListener('click', () => {
         // 用面板里 ② 的实际值（含流式开关）—— 这个诊断要验的就是「扩展配的那套」
-        const stage = currentStageState?.critic ?? readStage(el, 'critic', currentStageState?.critic ?? {});
+        const stage = readStagesNow().critic;
         window.awProbeChannel?.(
             stage.apiUrl,
             stage.apiKey,
@@ -445,15 +464,13 @@ function bindEvents(el) {
         window.awLastRequests?.();
     });
     el.querySelector('#aw-diag-plan')?.addEventListener('click', () => {
-        // 不发请求，只把扩展实际会构造的 custom_api 打出来。
-        // 必须用 currentStageState（随输入实时更新），而不是 mountOptions.settings
-        // —— 后者是挂载那一刻的快照，改过的值不会反映进去。
-        window.awChannelPlan?.(currentStageState ?? mountOptions.settings);
+        // 不发请求，只把扩展实际会构造的 custom_api 打出来
+        window.awChannelPlan?.(readStagesNow());
     });
     el.querySelector('#aw-diag-exact')?.addEventListener('click', () => {
         // 用面板里真实的 temperature / max_tokens / 附加字段复现 ② 的请求 ——
         // 换渠道诊断用的是它自己编的参数，测不出「实跑才失败」这类问题。
-        window.awProbeExact?.(currentStageState ?? mountOptions.settings);
+        window.awProbeExact?.(readStagesNow());
     });
     el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
         const model = el.querySelector('#aw-diag-model')?.value ?? '';

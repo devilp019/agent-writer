@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.10';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.10';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.12';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.12';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.10');
+        const mod = await import('./pipeline.js?v=0.8.12');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.10 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.12 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.10');
+        const mod = await import('./tavern.js?v=0.8.12');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.10 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.12 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1038,7 +1038,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.10'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.12'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1064,6 +1064,16 @@ export async function probeExact(settings) {
     say(`max_tokens   ${customApi.max_tokens ?? '(不传)'}`);
     say(`流式         ${useStream ? '开' : '关'}`);
     say(`附加字段     ${Object.keys(bodyFields).length ? JSON.stringify(bodyFields) : '{}（空）'}`);
+
+    // 原始文本也打出来 —— 只有它能区分「没填」和「填了但 JSON 解析失败」。
+    // 实测踩到过：用户明明填了，诊断里却显示空，当时无法判断是哪一种。
+    const rawFields = stage.bodyFieldsRaw;
+    if (typeof rawFields === 'string') {
+        say(`附加字段原文 ${JSON.stringify(rawFields.slice(0, 200))}`);
+        if (rawFields.trim() && rawFields.trim() !== '{}' && Object.keys(bodyFields).length === 0) {
+            say('  ⚠ 原文有内容但没解析成对象 ⇒ JSON 写坏了，这一项被忽略了');
+        }
+    }
     say('');
 
     // 严格照抄 buildCustomApi 的产出 + 附加字段，只替掉 messages。
@@ -1090,17 +1100,16 @@ export async function probeExact(settings) {
     say('  ' + Object.keys(body).join(', '));
     say('');
 
-    const exactReport = await sendAndReport(context, body, say, out);
-    const exactVerdict = verdictOf(exactReport);
+    const exact = await sendAndReport(context, body, say, out);
 
     // 自证：把判断依据打出来。
-    // 这里出过一次「输出自相矛盾」——同一段输出里既有 ✘ 又走了「通过」分支，
+    // 这里出过一次事故 —— 输出里既有「✘ 上游/酒馆报错」又走了「通过」分支，
     // 而我只能靠比对文案去猜用户装的是哪一版。打出来就不必猜。
-    say(`（判断依据：${exactVerdict}；响应文本长度 ${String(exactReport ?? '').length}）`);
+    say(`（判断依据：${exact.verdict}；HTTP ${exact.status ?? '?'}；响应 ${exact.raw.length} 字）`);
     say('');
 
     // 只有真的复现了失败才继续二分 —— 没失败说明触发条件还没找到。
-    if (exactVerdict !== 'fail') {
+    if (exact.verdict !== 'fail') {
         say('=== 判断 ===');
         say('  · 用真实参数这里是通的 ⇒ 差别在「走不走酒馆助手的 generate()」，');
         say('    下一步看「查看实际请求体」里实发的那份 generate_data。');
@@ -1134,8 +1143,8 @@ export async function probeExact(settings) {
         const v = JSON.parse(JSON.stringify(body));
         mutate(v);
         say(`--- ${label}`);
-        const report = await sendAndReport(context, v, say, out);
-        if (verdictOf(report) === 'ok') {
+        const result = await sendAndReport(context, v, say, out);
+        if (result.verdict === 'ok') {
             found = label;
             say(`⇒ 「${label}」让它通了 —— 触发点就在这一项改掉的字段上。`);
             break;
@@ -1173,9 +1182,12 @@ export async function probeExact(settings) {
  * （Cline 就是撞额度也回 401），所以状态码和响应体必须都打出来，
  * 不能只凭状态码下结论。
  *
- * @returns {Promise<string>} 原始响应文本（调用方据此判断通没通）
+ * 判读交给 classifyBackendResponse（纯函数，有测试）。
+ *
+ * @returns {{verdict: 'ok'|'fail'|'unknown', status: number|null, message: string, raw: string}}
  */
 async function sendAndReport(context, body, say, out) {
+    say(`HTTP …`);
     try {
         const resp = await fetch('/api/backends/chat-completions/generate', {
             method: 'POST',
@@ -1183,56 +1195,84 @@ async function sendAndReport(context, body, say, out) {
             body: JSON.stringify(body),
         });
         const text = await resp.text();
-        say(`HTTP ${resp.status}`);
+        const result = classifyBackendResponse(text, resp.status);
+        // 把刚刚那行占位的 "HTTP …" 换成真实状态码
+        out[out.length - 1] = `HTTP ${resp.status}`;
+        say(result.verdict === 'fail' ? '✘ 上游/酒馆报错：' : '');
+        if (result.message) say('  ' + result.message);
         say('');
-
-        let parsed = null;
-        try { parsed = JSON.parse(text); } catch { /* 可能是 SSE 或纯文本 */ }
-
-        if (parsed?.error) {
-            const msg = typeof parsed.error === 'object'
-                ? (parsed.error.message ?? JSON.stringify(parsed.error))
-                : String(parsed.error);
-            say('✘ 上游/酒馆报错：');
-            say('  ' + msg);
-        } else if (/^\s*data:/m.test(text)) {
-            const lines = text.split('\n').filter((l) => l.startsWith('data:'));
-            const done = lines.some((l) => l.includes('[DONE]'));
-            let chars = 0;
-            for (const line of lines) {
-                if (line.includes('[DONE]')) continue;
-                let j = null;
-                try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                chars += String((j?.data ?? j)?.choices?.[0]?.delta?.content ?? '').length;
-            }
-            say(`✔ 流式成功：分片 ${lines.length} 个，正文 ${chars} 字${done ? '，收到 [DONE]' : ''}`);
-        } else if (parsed) {
-            const inner = parsed?.data ?? parsed;
-            const content = inner?.choices?.[0]?.message?.content ?? inner?.choices?.[0]?.text ?? parsed?.content ?? '';
-            if (String(content).trim()) {
-                say(`✔ 成功：${JSON.stringify(String(content).slice(0, 80))}`);
-            } else {
-                say('△ 通了但没正文。原始响应前 300 字：');
-                say('  ' + text.slice(0, 300));
-            }
-        } else {
-            say('响应不是 JSON，前 300 字：');
-            say('  ' + text.slice(0, 300));
-        }
-        say('');
-        return text;
+        return result;
     } catch (e) {
-        say(`抛错: ${e?.message}${e?.cause ? ` / cause: ${e?.cause?.message ?? e.cause}` : ''}`);
+        const detail = `${e?.message}${e?.cause ? ` / cause: ${e?.cause?.message ?? e.cause}` : ''}`;
+        out[out.length - 1] = `HTTP (请求抛错)`;
+        say(`抛错: ${detail}`);
         say('');
-        return `抛错: ${e?.message}`;
+        return { verdict: 'fail', status: null, message: `抛错: ${detail}`, raw: '' };
     }
 }
 
-/** 从 sendAndReport 的输出里判断这次是通还是不通 */
-function verdictOf(reportText) {
-    if (/✔/.test(reportText)) return 'ok';
-    if (/✘/.test(reportText)) return 'fail';
-    return 'unknown';
+/**
+ * 把酒馆后端的响应文本判读成「通 / 不通 / 说不清」。
+ *
+ * 抽成纯函数是为了能单独测 —— 这段逻辑出过一次事故：
+ * 输出里明明白白写着「✘ 上游/酒馆报错」，而调用方却判出 unknown，
+ * 于是二分不跑、还走了「通过」分支，白绕了好几轮。
+ * 读代码看不出问题（.message 的分支确实写了），所以必须有测试。
+ *
+ * @returns {{verdict: 'ok'|'fail'|'unknown', status: number|null, message: string, raw: string}}
+ */
+export function classifyBackendResponse(text, status = null) {
+    const raw = String(text ?? '');
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch { /* 可能是 SSE 或纯文本 */ }
+
+    // 上游/酒馆的报错：error 可能是字符串、对象，也可能是布尔 true。
+    // 注意空字符串和 false 不算报错 —— 直接判 `!== undefined` 会把
+    // {"error":""} 误判成失败（这个边界是测试抓出来的）。
+    const errField = parsed?.error;
+    const hasError = typeof errField === 'string'
+        ? errField.trim().length > 0
+        : Boolean(errField);
+    if (hasError) {
+        const message = typeof errField === 'object'
+            ? (errField.message ?? JSON.stringify(errField))
+            : String(errField);
+        return { verdict: 'fail', status, message, raw };
+    }
+
+    // 流式：SSE
+    if (/^\s*data:/m.test(raw)) {
+        const lines = raw.split('\n').filter((l) => l.startsWith('data:'));
+        const done = lines.some((l) => l.includes('[DONE]'));
+        let chars = 0;
+        for (const line of lines) {
+            if (line.includes('[DONE]')) continue;
+            let j = null;
+            try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+            chars += String((j?.data ?? j)?.choices?.[0]?.delta?.content ?? '').length;
+        }
+        return {
+            verdict: 'ok',
+            status,
+            message: `流式成功：分片 ${lines.length} 个，正文 ${chars} 字${done ? '，收到 [DONE]' : ''}`,
+            raw,
+        };
+    }
+
+    // 非流式：Cline 会把标准结构再包一层 data，两种都认
+    if (parsed && typeof parsed === 'object') {
+        const inner = parsed.data ?? parsed;
+        const content = inner?.choices?.[0]?.message?.content
+            ?? inner?.choices?.[0]?.text
+            ?? parsed.content
+            ?? '';
+        if (String(content).trim()) {
+            return { verdict: 'ok', status, message: `成功：${JSON.stringify(String(content).slice(0, 80))}`, raw };
+        }
+        return { verdict: 'unknown', status, message: `通了但没正文。原始响应前 300 字：\n  ${raw.slice(0, 300)}`, raw };
+    }
+
+    return { verdict: 'unknown', status, message: `响应不是 JSON，前 300 字：\n  ${raw.slice(0, 300)}`, raw };
 }
 
 /** 挂到 window，方便不开面板直接调用 */
