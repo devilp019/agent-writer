@@ -290,7 +290,7 @@ function describeYamlHeaders(yamlText) {
         const value = m[2].trim().replace(/^["']|["']$/g, '');
         if (!key) continue;
         out[key] = /^Bearer\s+/i.test(value)
-            ? `Bearer <已打码>（长度 ${value.length}）  ⚠ 带 Bearer 前缀`
+            ? `Bearer <已打码>（长度 ${value.length}）`
             : `<已打码>（长度 ${value.length}）`;
     }
     return Object.keys(out).length ? out : { '(没解析出请求头)': String(yamlText).slice(0, 200) };
@@ -501,6 +501,27 @@ export function humanizeUpstreamError(error) {
 }
 
 /**
+ * 把请求头对象序列化成酒馆要的字符串形式。
+ *
+ * 为什么必须是字符串：实测同一个 key、同一个 body，
+ *   custom_include_headers 传对象   → HTTP 400
+ *   custom_include_headers 传字符串 → HTTP 200
+ * 酒馆后端不会替我们把对象变成请求头。
+ *
+ * 格式照抄织幕：`"键": "值"` 每行一条（合法 YAML 映射）。
+ * 不用 JSON.stringify —— 那样整段是一个 JSON 串，不是酒馆要的映射。
+ *
+ * @param {Record<string, string>} headers
+ * @returns {string}
+ */
+export function serializeHeaders(headers) {
+    return Object.entries(headers)
+        .filter(([name, value]) => String(name ?? '').trim() && value !== undefined && value !== null)
+        .map(([name, value]) => `${JSON.stringify(String(name))}: ${JSON.stringify(String(value))}`)
+        .join('\n');
+}
+
+/**
  * 把一个阶段的设置编译成 TavernHelper 的 `custom_api`。
  *
  * 抽成独立函数是为了让它成为**单一真相源**：tavernGenerate 用它发请求，
@@ -550,19 +571,16 @@ export function buildCustomApi(stage = {}) {
         // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
         customApi.source = 'custom';
         if (apiKey) {
-            // 值必须带 `Bearer ` 前缀，且**不能**只放裸 key。
+            // 值必须带 `Bearer ` 前缀 —— 实测：Authorization 直接放裸 key，
+            // Cline 回的正是那句误导性的 401。
             //
-            // 这是实测出来的：酒馆后端把 custom_include_headers 的值**原样**
-            // 当作 Authorization 头发出去，不会自己补前缀。
-            // 二分结果（同一个 key、同一个 body，只改这一个值）：
-            //   裸 key                        → HTTP 400 Unauthorized
-            //   "Bearer sk_..."               → HTTP 200
+            // 而且**必须序列化成字符串**，不能传对象。实测（同一个 key、同一个 body）：
+            //   custom_include_headers 传对象 {"Authorization":"Bearer sk_..."} → 400
+            //   custom_include_headers 传字符串 '"Authorization": "Bearer sk_..."' → 200
+            // 也就是说酒馆后端不会替我们把对象变成请求头。
             //
-            // 我一度把前缀去掉了，理由是「TavernHelper 会自己拼成 Bearer ${key}，
-            // 加了会变双前缀」——那个担心是多余的：会自己拼前缀的是它内部
-            // overrideCustomAuthorizationHeader，只作用于 custom_api.key 那条旧路；
-            // 我们自己给 custom_include_headers 时它是整体替换，不会再加一次。
-            customApi.custom_include_headers = { Authorization: `Bearer ${apiKey}` };
+            // 形态上照抄织幕的做法（它把请求头 YAML 序列化之后放进这个字段）。
+            customApi.custom_include_headers = serializeHeaders({ Authorization: `Bearer ${apiKey}` });
         }
 
         // 附加请求体字段走 custom_include_body，**用面板里的原文**。
