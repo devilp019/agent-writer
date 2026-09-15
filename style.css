@@ -394,6 +394,34 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+.aw-field {
+    display: block;
+    margin-bottom: 10px;
+}
+
+.aw-field > span {
+    display: block;
+    font-size: 12px;
+    color: var(--aw-text-dim);
+    margin-bottom: 5px;
+}
+
+.aw-field > input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--aw-surface-2);
+    color: var(--aw-text);
+    border: 1px solid var(--aw-border);
+    border-radius: 8px;
+    padding: 9px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    min-height: 40px;
+}
+
+.aw-field > input:focus { border-color: var(--aw-accent-line); }
+
 .aw-btn {
     padding: 9px 14px;
     background: var(--aw-surface);

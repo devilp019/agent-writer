@@ -211,6 +211,10 @@ function bindEvents(el) {
     el.querySelector('#aw-diag-secret')?.addEventListener('click', () => {
         window.awProbeSecret?.();
     });
+    el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
+        const model = el.querySelector('#aw-diag-model')?.value ?? '';
+        window.awProbeShape?.(model);
+    });
     el.querySelector('#aw-diag-copy')?.addEventListener('click', async () => {
         const output = el.querySelector('#aw-diag-output');
         if (!output?.value) return;
@@ -370,6 +374,13 @@ const PANEL_HTML = `
                     <button id="aw-diag-probe" class="aw-btn">测试当前连接配置</button>
                     <button id="aw-diag-secret" class="aw-btn">密钥来源对照</button>
                     <button id="aw-diag-copy" class="aw-btn">复制结果</button>
+                </div>
+                <label class="aw-field">
+                    <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>
+                    <input type="text" id="aw-diag-model" placeholder="例如 cline-pass/deepseek-v4.1-flash">
+                </label>
+                <div class="aw-row">
+                    <button id="aw-diag-shape" class="aw-btn">开始形状对照</button>
                 </div>
                 <textarea id="aw-diag-output" readonly rows="10" placeholder="尚未运行"></textarea>
             </div>

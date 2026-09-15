@@ -472,9 +472,160 @@ export async function probeSecret() {
     return out.join('\n');
 }
 
+/**
+ * 空请求体对照：极端 A/B 测试。
+ *
+ * 背景：cline2 在酒馆里手动用能通，但程序构造请求时上游回 500
+ * （而换一个不存在的模型名回的是 Bad Request，说明请求确实到达并被解析了）。
+ * 「能判断模型名不合法、却在对的模型名上崩掉」通常意味着请求体里有它不接受的字段。
+ *
+ * 所以这里发一个几乎空的 body，看它认不认。如果空 body 能通，
+ * 就逐个把字段加回去，二分找出是哪个字段把上游搞崩的。
+ *
+ * @param {string} [model] 留空则用 profile 的模型
+ */
+export async function probeShape(model) {
+    const context = ctx();
+    const svc = context?.ConnectionManagerRequestService;
+    if (!svc) {
+        setDiagOutput('ConnectionManagerRequestService 不可用。');
+        return null;
+    }
+
+    const profileId = getDiagProfileId(context);
+    let profile;
+    try {
+        profile = svc.getProfile(profileId);
+    } catch (e) {
+        setDiagOutput(`取连接配置失败: ${e?.message}`);
+        return null;
+    }
+
+    const apiMap = context.CONNECT_API_MAP?.[profile.api] ?? {};
+    const useModel = String(model ?? '').trim() || profile.model;
+    const url = profile['api-url'];
+
+    const out = [];
+    const say = (s) => {
+        out.push(s);
+        setDiagOutput(out.join('\n'));
+    };
+
+    say('=== 请求体形状对照 ===');
+    say(`配置「${profile.name}」  api-url=${url || '(空)'}`);
+    say(`使用模型 ${useModel || '(空)'}`);
+    say('');
+
+    async function attempt(label, body, { viaService = false } = {}) {
+        // 干掉 undefined，避免服务端把它当成"有值"
+        for (const k of Object.keys(body)) {
+            if (body[k] === undefined) delete body[k];
+        }
+
+        const shown = JSON.stringify(body);
+        say(`${label}`);
+        say(`   发出: ${shown.length > 320 ? `${shown.slice(0, 320)}…` : shown}`);
+
+        try {
+            if (viaService) {
+                // 走酒馆自己的服务代码，拿到的是上游错误对象（如果它选择抛错）
+                const result = await svc.sendRequest(
+                    profileId,
+                    body.messages,
+                    body.max_tokens ?? 8,
+                    { stream: false, extractData: true, includePreset: false, includeInstruct: false },
+                    useModel ? { model: useModel } : {},
+                );
+                const content = String(result?.content ?? '');
+                say(`   ✔ 服务代码返回: ${JSON.stringify(content.slice(0, 80))}`);
+                return true;
+            }
+
+            const resp = await fetch('/api/backends/chat-completions/generate', {
+                method: 'POST',
+                headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const text = await resp.text();
+            let parsed = null;
+            try { parsed = JSON.parse(text); } catch { /* 非 JSON */ }
+
+            if (parsed?.error) {
+                say(`   ✘ HTTP ${resp.status}  上游报错: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
+                return false;
+            }
+            const content = parsed?.choices?.[0]?.message?.content
+                ?? parsed?.choices?.[0]?.text ?? parsed?.content ?? '';
+            say(`   ✔ HTTP ${resp.status}  返回: ${JSON.stringify(String(content).slice(0, 80))}`);
+            return true;
+        } catch (e) {
+            const cause = e?.cause?.message ?? e?.cause;
+            say(`   ✘ 抛错: ${e?.message}${cause ? ` / cause: ${cause}` : ''}`);
+            return false;
+        } finally {
+            say('');
+        }
+    }
+
+    const messages = [{ role: 'user', content: 'Say OK' }];
+
+    // 1. 最干净：只有 messages + model，连 source 都不给
+    await attempt('① 极简 body（只有 messages + model）', {
+        stream: false,
+        messages,
+        model: useModel,
+    });
+
+    // 2. 加 source 和 custom_url（我目前用的形状）
+    await attempt('② 加 chat_completion_source + custom_url', {
+        stream: false,
+        messages,
+        model: useModel,
+        chat_completion_source: apiMap.source ?? 'custom',
+        custom_url: url,
+    });
+
+    // 3. 再加 max_tokens / use_sysprompt
+    await attempt('③ 再加 max_tokens + use_sysprompt', {
+        stream: false,
+        messages,
+        model: useModel,
+        chat_completion_source: apiMap.source ?? 'custom',
+        custom_url: url,
+        max_tokens: 8,
+        use_sysprompt: true,
+    });
+
+    // 4. 换成一个看起来很正常的 max_tokens（8 太小可能被上游嫌弃）
+    await attempt('④ max_tokens 改成 1024', {
+        stream: false,
+        messages,
+        model: useModel,
+        chat_completion_source: apiMap.source ?? 'custom',
+        custom_url: url,
+        max_tokens: 1024,
+        use_sysprompt: true,
+    });
+
+    // 5. 走酒馆自己的服务代码（它内部会按 source 分派）
+    await attempt('⑤ 走 ConnectionManagerRequestService', {
+        messages,
+        max_tokens: 1024,
+    }, { viaService: true });
+
+    say('判断方法：');
+    say('  · ① 能通而 ② 不通 ⇒ 问题在 chat_completion_source / custom_url');
+    say('  · ③ 不通而 ④ 通 ⇒ max_tokens 太小被上游拒绝');
+    say('  · ⑤ 能通 ⇒ 用服务路径就行，我的极简构造有问题');
+    say('  · 全都不通 ⇒ 需要拿酒馆真正发出的那份 body 来对比（下一步）');
+    log('请求体形状对照完成');
+    return out.join('\n');
+}
+
 /** 挂到 window，方便不开面板直接调用 */
 export function exposeGlobals() {
     globalThis.awDiagnose = diagnose;
     globalThis.awProbe = probe;
     globalThis.awProbeSecret = probeSecret;
+    globalThis.awProbeShape = probeShape;
 }
