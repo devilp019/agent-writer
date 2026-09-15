@@ -114,13 +114,24 @@ manifest.json      ST 扩展清单（必须在根目录）
 index.js           入口：装配、生命周期钩子、设置读写
 state.js           状态机 + 订阅（球和菜单项的唯一状态源）
 diagnostics.js     自检与连通性探测
-settings.html      面板模板
 style.css          样式与动画
 ui/
   fab.js           悬浮球：7 态动画、拖拽、resize 重夹位置
   menu.js          扩展菜单项：含行内状态
-  panel.js         面板：渲染、拖拽、页签、日志
+  panel.js         面板：内联模板 + 渲染、拖拽、页签、日志
+_dev/
+  smoke.mjs        本地烟测（不随扩展加载，改完代码在电脑上跑一下）
 ```
+
+> 面板模板内联在 `ui/panel.js` 的 `PANEL_HTML` 里，**没有 settings.html**。
+> 走 `renderExtensionTemplateAsync` 需要酒馆按扩展文件夹名解析模板路径，
+> 路径一旦对不上会静默失败，表现为「悬浮球能点但面板打不开」。内联之后这条失败路径不存在。
+
+### 三处为了「坏不掉」做的设计
+
+1. **面板挂载与 UI 挂载分离**。`onEnable` 钩子在加载期就会跑，如果面板挂载和它共用一个「只跑一次」的闸门，随后 `APP_READY` 的回调会被吞掉，面板永远不创建。现在 `startUI()`（球 + 菜单项）和 `mountPanelOnce()`（面板）是两条独立路径，且面板挂载是幂等的。
+2. **点球时就地补挂**。`togglePanel()` 会先 `ensurePanelMounted()`，即使初始化时序出问题，点一下也会把面板补出来，而不是毫无反应。
+3. **启动三重保险**。`APP_READY` 事件 + `onActivate` / `onEnable` 钩子 + 后台重试定时器，谁先到都能把 UI 拉起来。
 
 ### 为什么图标都用 inline SVG
 
@@ -137,6 +148,16 @@ ui/
 只用 `SillyTavern.getContext()` 暴露的 API，**不深层 `import` ST 内部模块**。官方文档明确说深层导入随时会因内部结构变动而失效，而本项目没有本地酒馆环境可以快速定位问题。
 
 调试入口挂在 `window.aw` 上。
+
+### 本地烟测
+
+平板后端开不了控制台，所以把真实的 UI 模块跑在一个最小 DOM 桩上，先在电脑上排掉「点了没反应」这类问题：
+
+```bash
+node _dev/smoke.mjs
+```
+
+覆盖：面板挂载与就地补挂、模板完整性（JS 引用的 id 是否都在模板里）、页签切换、状态机到悬浮球/菜单项的联动、徽标截断与自动清空。**改完 UI 代码先跑它**，42 项全绿再推。
 
 ---
 

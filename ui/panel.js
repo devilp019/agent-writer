@@ -14,6 +14,7 @@ const MARGIN = 12;
 let panel = null;
 let logLines = [];
 let onAutoChange = null;
+let mountOptions = {};
 
 // ---------------------------------------------------------------------------
 // 位置
@@ -175,46 +176,47 @@ function switchTab(tab) {
     });
 }
 
-function bindEvents() {
-    panel.querySelector('#aw-close')?.addEventListener('click', () => hidePanel());
+function bindEvents(el) {
+    el.querySelector('#aw-close')?.addEventListener('click', () => hidePanel());
 
-    panel.querySelectorAll('.aw-tab').forEach((btn) => {
+    el.querySelectorAll('.aw-tab').forEach((btn) => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
     });
 
-    panel.querySelector('#aw-log-clear')?.addEventListener('click', clearLog);
+    el.querySelector('#aw-log-clear')?.addEventListener('click', clearLog);
 
     // 状态演示：确认三端动画表现
-    panel.querySelectorAll('[data-state-demo]').forEach((btn) => {
+    el.querySelectorAll('[data-state-demo]').forEach((btn) => {
         btn.addEventListener('click', () => {
             const state = btn.dataset.stateDemo;
             log(`预览状态: ${state}`);
+            const detail = state === 'checking' ? { badge: '1620' } : state === 'error' ? { badge: '3' } : null;
             // 先回 idle，保证连点同一个状态也能重新触发动画
-            setState('idle');
-            setState(state, state === 'checking' ? { badge: '1620' } : state === 'error' ? { badge: '3' } : null);
+            mountOptions.onDemoState?.('idle', null);
+            mountOptions.onDemoState?.(state, detail);
         });
     });
 
-    panel.querySelector('#aw-auto')?.addEventListener('change', (event) => {
+    el.querySelector('#aw-auto')?.addEventListener('change', (event) => {
         onAutoChange?.(event.target.checked);
     });
 
     // 自检与连通性测试由 index.js 注入，避免 panel 依赖 diagnostics
-    panel.querySelector('#aw-diag-run')?.addEventListener('click', () => {
+    el.querySelector('#aw-diag-run')?.addEventListener('click', () => {
         window.awDiagnose?.();
     });
-    panel.querySelector('#aw-diag-probe')?.addEventListener('click', () => {
+    el.querySelector('#aw-diag-probe')?.addEventListener('click', () => {
         window.awProbe?.();
     });
-    panel.querySelector('#aw-diag-copy')?.addEventListener('click', async () => {
-        const el = panel.querySelector('#aw-diag-output');
-        if (!el?.value) return;
+    el.querySelector('#aw-diag-copy')?.addEventListener('click', async () => {
+        const output = el.querySelector('#aw-diag-output');
+        if (!output?.value) return;
         try {
-            await navigator.clipboard.writeText(el.value);
+            await navigator.clipboard.writeText(output.value);
             log('自检结果已复制到剪贴板');
         } catch {
             // 剪贴板 API 在非 HTTPS 下不可用，退回选中让用户手动复制
-            el.select();
+            output.select();
             log('剪贴板不可用，已选中文本，请手动复制');
         }
     });
@@ -222,19 +224,28 @@ function bindEvents() {
 
 /**
  * 渲染并挂载面板。
+ *
+ * 模板直接内联在下面的 PANEL_HTML 里，不走 renderExtensionTemplateAsync：
+ * 那个函数依赖酒馆按扩展文件夹名去解析模板路径，一旦路径不对就静默失败，
+ * 表现为「球能点但面板打不开」。内联之后这条失败路径根本不存在。
+ *
  * @param {object} options
- * @param {(html: string) => string} options.renderTemplate 用 context.renderExtensionTemplateAsync 包一层
  * @param {(auto: boolean) => void} [options.onAutoChange]
+ * @param {(state: string, detail: object|null) => void} [options.onDemoState] 状态演示回调
+ * @returns {HTMLElement|null}
  */
-export async function mountPanel({ renderTemplate, onAutoChange: autoCb } = {}) {
-    onAutoChange = autoCb;
+export function mountPanel(options = {}) {
+    if (!options.onDemoState) {
+        options.onDemoState = (state, detail) => setState(state, detail);
+    }
+    mountOptions = options;
 
-    const html = await renderTemplate('settings');
     const holder = document.createElement('div');
-    holder.innerHTML = html;
+    holder.innerHTML = PANEL_HTML;
     const el = holder.querySelector(`#${PANEL_ID}`);
     if (!el) {
-        throw new Error('面板模板里找不到 #aw-panel（settings.html 是否被改动？）');
+        console.error('[AgentWriter] 面板 HTML 解析失败');
+        return null;
     }
 
     document.getElementById(PANEL_ID)?.remove();
@@ -242,7 +253,7 @@ export async function mountPanel({ renderTemplate, onAutoChange: autoCb } = {}) 
     document.body.appendChild(panel);
 
     makeHeaderDraggable(panel, panel.querySelector('#aw-header'));
-    bindEvents();
+    bindEvents(el);
     switchTab('params');
     applyLayout();
 
@@ -252,13 +263,22 @@ export async function mountPanel({ renderTemplate, onAutoChange: autoCb } = {}) 
     return panel;
 }
 
+/** 幂等挂载：已挂上就直接返回 */
+export function ensurePanelMounted() {
+    if (panel?.isConnected) return panel;
+    return mountPanel(mountOptions ?? {});
+}
+
 function onViewportChange() {
     if (!panel) return;
     applyLayout();
 }
 
 export function showPanel() {
-    if (!panel) return;
+    if (!ensurePanelMounted()) {
+        console.error('[AgentWriter] 面板挂载失败，无法显示');
+        return;
+    }
     applyLayout();
     panel.style.display = 'flex';
 }
@@ -268,7 +288,8 @@ export function hidePanel() {
 }
 
 export function togglePanel() {
-    if (!panel) return;
+    // 关键：面板可能因为初始化时序问题还没挂上，这里就地补挂，避免"球能点但没反应"
+    if (!ensurePanelMounted()) return;
     if (panel.style.display === 'flex') hidePanel();
     else showPanel();
 }
@@ -293,3 +314,126 @@ export function setDiagOutput(text) {
 export function getAutoCheckbox() {
     return document.getElementById('aw-auto');
 }
+
+// ---------------------------------------------------------------------------
+// 面板模板（内联，不依赖任何异步加载）
+// ---------------------------------------------------------------------------
+
+const PANEL_HTML = `
+<div id="aw-panel">
+    <div id="aw-header">
+        <div class="aw-title">
+            <span class="aw-logo" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                    <path d="M13 2 4.5 13.5H11L10 22l8.5-11.5H12z"/>
+                </svg>
+            </span>
+            <div>
+                <div class="aw-name">Agent Writer</div>
+                <div class="aw-sub">原生草稿 · 校验 · 重写</div>
+            </div>
+        </div>
+        <div class="aw-header-actions">
+            <label class="aw-switch" title="开启后，酒馆每次发送都会自动跑 ②③">
+                <input type="checkbox" id="aw-auto">
+                <span>自动</span>
+            </label>
+            <button id="aw-close" class="aw-icon-btn" title="关闭">&#10005;</button>
+        </div>
+    </div>
+
+    <div class="aw-tabs" role="tablist">
+        <button class="aw-tab" data-tab="params">参数</button>
+        <button class="aw-tab" data-tab="prompts">提示词</button>
+        <button class="aw-tab" data-tab="output">输出</button>
+        <button class="aw-tab" data-tab="log">日志</button>
+    </div>
+
+    <div class="aw-content">
+        <section class="aw-tab-panel" data-panel="params">
+            <div class="aw-note">
+                <b>① 草稿</b> = 酒馆原生生成（用你当前连接）。<br>
+                <b>②③</b> 的接入是下一步，本版本只验证运行环境。
+            </div>
+
+            <div class="aw-card">
+                <div class="aw-card-title">运行环境自检</div>
+                <p class="aw-hint">
+                    确认扩展装对了、酒馆 API 拿得到、连接配置能发请求。
+                    点「运行自检」后把结果截图发出来即可。
+                </p>
+                <div class="aw-row">
+                    <button id="aw-diag-run" class="aw-btn aw-btn-primary">运行自检</button>
+                    <button id="aw-diag-probe" class="aw-btn">测试当前连接配置</button>
+                    <button id="aw-diag-copy" class="aw-btn">复制结果</button>
+                </div>
+                <textarea id="aw-diag-output" readonly rows="10" placeholder="尚未运行"></textarea>
+            </div>
+
+            <div class="aw-card">
+                <div class="aw-card-title">悬浮球状态演示</div>
+                <p class="aw-hint">点击可预览各状态下的动态效果，确认平板/手机上的表现。</p>
+                <div class="aw-row">
+                    <button class="aw-btn" data-state-demo="idle">待命</button>
+                    <button class="aw-btn" data-state-demo="drafting">草稿</button>
+                    <button class="aw-btn" data-state-demo="checking">校验</button>
+                    <button class="aw-btn" data-state-demo="rewriting">改写</button>
+                    <button class="aw-btn" data-state-demo="done">完成</button>
+                    <button class="aw-btn" data-state-demo="error">出错</button>
+                    <button class="aw-btn" data-state-demo="off">停用</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="aw-tab-panel" data-panel="prompts" hidden>
+            <div class="aw-card">
+                <div class="aw-card-title">校验提示词</div>
+                <textarea id="aw-critic-prompt" rows="12" placeholder="下一步接入"></textarea>
+            </div>
+            <div class="aw-card">
+                <div class="aw-card-title">改写提示词</div>
+                <textarea id="aw-rewrite-prompt" rows="12" placeholder="下一步接入"></textarea>
+            </div>
+        </section>
+
+        <section class="aw-tab-panel" data-panel="output" hidden>
+            <div class="aw-card">
+                <div class="aw-head"><span>① 草稿</span><span class="aw-stat" id="aw-draft-stats"></span></div>
+                <textarea id="aw-draft" rows="5" readonly></textarea>
+            </div>
+            <div class="aw-card">
+                <div class="aw-head"><span>② 校验</span><span class="aw-stat" id="aw-report-stats"></span></div>
+                <textarea id="aw-report" rows="5" readonly></textarea>
+                <details class="aw-details">
+                    <summary>思维链 <span class="aw-stat" id="aw-critic-reasoning-stats"></span></summary>
+                    <textarea id="aw-critic-reasoning" rows="6" readonly class="aw-reasoning"></textarea>
+                </details>
+            </div>
+            <div class="aw-card">
+                <div class="aw-head"><span>③ 最终正文</span><span class="aw-stat" id="aw-final-stats"></span></div>
+                <textarea id="aw-final" rows="6" readonly></textarea>
+                <details class="aw-details">
+                    <summary>思维链 <span class="aw-stat" id="aw-final-reasoning-stats"></span></summary>
+                    <textarea id="aw-final-reasoning" rows="6" readonly class="aw-reasoning"></textarea>
+                </details>
+            </div>
+        </section>
+
+        <section class="aw-tab-panel" data-panel="log" hidden>
+            <div class="aw-card">
+                <div class="aw-head">
+                    <span>调试日志</span>
+                    <button id="aw-log-clear" class="aw-icon-btn">清空</button>
+                </div>
+                <div id="aw-log" class="aw-log"></div>
+            </div>
+        </section>
+    </div>
+
+    <div class="aw-footer">
+        <button id="aw-run" class="aw-btn aw-btn-primary aw-grow" disabled
+                title="流水线尚未接入">▶ 用最后一条 AI 回复作草稿</button>
+        <button id="aw-stop" class="aw-btn aw-btn-danger" disabled>⏹ 停止</button>
+    </div>
+</div>
+`;
