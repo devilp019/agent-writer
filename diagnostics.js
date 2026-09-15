@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.7';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.7';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.8';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.8';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.7');
+        const mod = await import('./pipeline.js?v=0.8.8');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.7 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.8 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.7');
+        const mod = await import('./tavern.js?v=0.8.8');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.7 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.8 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1038,7 +1038,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.7'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.8'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1082,7 +1082,66 @@ export async function probeExact(settings) {
     say('  ' + Object.keys(body).join(', '));
     say('');
 
-    return await sendAndReport(context, body, say, out);
+    const exactReport = await sendAndReport(context, body, say, out);
+
+    // 只有真的复现了失败才继续二分 —— 没失败说明触发条件还没找到。
+    if (verdictOf(exactReport) !== 'fail') {
+        say('=== 判断 ===');
+        say('  · 用真实参数这里是通的 ⇒ 差别在「走不走酒馆助手的 generate()」，');
+        say('    下一步看「查看实际请求体」里实发的那份 generate_data。');
+        const okText = out.join('\n');
+        setDiagOutput(okText);
+        log('真实参数复现完成（通过）');
+        return okText;
+    }
+
+    say('=== 复现成功，继续二分 ===');
+    say('每次只改一处，看哪个字段是触发点。');
+    say('');
+
+    const variants = [
+        ['① 去掉 apiurl（诊断自己不发这个字段）', (b) => { delete b.apiurl; }],
+        ['② 去掉 source', (b) => { delete b.source; }],
+        ['③ 去掉 chat_completion_source', (b) => { delete b.chat_completion_source; }],
+        ['④ 去掉 use_sysprompt', (b) => { delete b.use_sysprompt; }],
+        ['⑤ max_tokens 降到 8192', (b) => { b.max_tokens = 8192; }],
+        ['⑥ max_tokens 降到 1024', (b) => { b.max_tokens = 1024; }],
+        ['⑦ temperature 改成 0.3', (b) => { b.temperature = 0.3; }],
+        ['⑧ 只留 model + messages + stream + custom_include_headers', (b) => {
+            for (const k of Object.keys(b)) {
+                if (!['model', 'messages', 'stream', 'custom_include_headers'].includes(k)) delete b[k];
+            }
+        }],
+    ];
+
+    let found = null;
+    for (const [label, mutate] of variants) {
+        const v = JSON.parse(JSON.stringify(body));
+        mutate(v);
+        say(`--- ${label}`);
+        const report = await sendAndReport(context, v, say, out);
+        if (verdictOf(report) === 'ok') {
+            found = label;
+            say(`⇒ 「${label}」让它通了 —— 触发点就在这一项改掉的字段上。`);
+            break;
+        }
+    }
+
+    say('');
+    say('=== 判断 ===');
+    if (found) {
+        say(`触发点在「${found}」改掉的字段上。`);
+    } else {
+        say('连最干净的 ⑧ 也失败 ⇒ 不是字段问题，是这条链路或这个 key 此刻的状态。');
+        say('拿同一个 key 跑 agent-writer-tools/probe-endpoint.mjs 对照：');
+        say('  直连通、这里不通 ⇒ 问题在酒馆后端这一层');
+        say('  直连也不通       ⇒ key 的问题（额度用尽 / 已失效）');
+    }
+
+    const text = out.join('\n');
+    setDiagOutput(text);
+    log('真实参数复现 + 二分完成');
+    return text;
 }
 
 /**
@@ -1091,6 +1150,15 @@ export async function probeExact(settings) {
  * 之所以要「如实」：上游的拒绝理由和 HTTP 状态码经常对不上
  * （Cline 就是撞额度也回 401），所以状态码和响应体必须都打出来，
  * 不能只凭状态码下结论。
+ */
+/**
+ * 把 body 发给酒馆后端并如实报告结果。
+ *
+ * 之所以要「如实」：上游的拒绝理由和 HTTP 状态码经常对不上
+ * （Cline 就是撞额度也回 401），所以状态码和响应体必须都打出来，
+ * 不能只凭状态码下结论。
+ *
+ * @returns {Promise<string>} 原始响应文本（调用方据此判断通没通）
  */
 async function sendAndReport(context, body, say, out) {
     try {
@@ -1136,21 +1204,20 @@ async function sendAndReport(context, body, say, out) {
             say('响应不是 JSON，前 300 字：');
             say('  ' + text.slice(0, 300));
         }
+        say('');
+        return text;
     } catch (e) {
         say(`抛错: ${e?.message}${e?.cause ? ` / cause: ${e?.cause?.message ?? e.cause}` : ''}`);
+        say('');
+        return `抛错: ${e?.message}`;
     }
+}
 
-    say('');
-    say('=== 判断 ===');
-    say('  · 这里 200、但实跑 401 → 差别只剩「走不走酒馆助手的 generate()」，');
-    say('    那就得看「查看实际请求体」里实发的那份 generate_data。');
-    say('  · 这里也 401 → 同一组参数就能复现，与酒馆助手那层无关，');
-    say('    是这组参数（最可能是 max_tokens）或这个 key 此刻的状态。');
-
-    const text = out.join('\n');
-    setDiagOutput(text);
-    log('真实参数复现完成');
-    return text;
+/** 从 sendAndReport 的输出里判断这次是通还是不通 */
+function verdictOf(reportText) {
+    if (/✔/.test(reportText)) return 'ok';
+    if (/✘/.test(reportText)) return 'fail';
+    return 'unknown';
 }
 
 /** 挂到 window，方便不开面板直接调用 */
