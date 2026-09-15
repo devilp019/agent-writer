@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.26';
+import { demoState } from '../state.js?v=0.8.27';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -162,7 +162,7 @@ function readStage(el, stage, current) {
 let currentStageState = null;
 
 /** 渲染两个阶段的配置控件并绑定事件 */
-function renderStageCards(el, settings) {
+export function renderStageCards(el, settings) {
     const state = { critic: { ...settings.critic }, final: { ...settings.final } };
     // 给诊断按钮用：它要读「面板里现在这套配置」，而这里就是唯一的真相源
     currentStageState = state;
@@ -338,7 +338,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.26';
+export const VERSION = '0.8.27';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -476,6 +476,62 @@ export function setRunning(busy, label) {
 }
 
 // ---------------------------------------------------------------------------
+// 版本历史
+// ---------------------------------------------------------------------------
+
+/**
+ * 画快照列表。
+ *
+ * 每条都要回答一个问题：**「这份和现在差在哪」** —— 那才是决定要不要
+ * 恢复的依据。差了什么由 mountOptions.getHistoryDiff 提供（它同时知道
+ * 快照和当前设置）。
+ */
+export function renderHistoryList() {
+    const box = document.getElementById('aw-snap-list');
+    const countEl = document.getElementById('aw-snap-count');
+    if (!box) return;
+
+    const items = mountOptions.listHistory?.() ?? [];
+
+    if (countEl) {
+        countEl.textContent = items.length ? `共 ${items.length} 份` : '';
+    }
+
+    if (items.length === 0) {
+        box.innerHTML = '<p class="aw-hint">还没有任何快照。改一下设置，或者点上面的「保存快照」。</p>';
+        return;
+    }
+
+    box.innerHTML = items.map((item) => {
+        const diff = mountOptions.historyDiff?.(item) ?? [];
+        const diffHtml = diff.length === 0
+            ? '<em class="aw-snap-same">和当前设置一样</em>'
+            : `<ul class="aw-snap-diff">${diff.slice(0, 8).map((d) => `<li>${esc(d)}</li>`).join('')}</ul>`;
+        const more = diff.length > 8 ? `<em class="aw-snap-same">…还有 ${diff.length - 8} 处</em>` : '';
+
+        return `<div class="aw-snap" data-id="${esc(item.id)}">
+            <div class="aw-snap-head">
+                <span class="aw-snap-when">${esc(item.when)}</span>
+                <span class="aw-snap-actions">
+                    <button class="aw-btn aw-snap-restore" data-id="${esc(item.id)}">恢复这一份</button>
+                    <button class="aw-btn aw-btn-danger aw-snap-del" data-id="${esc(item.id)}">删</button>
+                </span>
+            </div>
+            ${diffHtml}${more}
+            <details class="aw-details">
+                <summary>这份里存了什么</summary>
+                <textarea rows="8" readonly class="aw-snap-body">${esc(item.summary)}</textarea>
+            </details>
+        </div>`;
+    }).join('');
+}
+
+export function setHistoryCount(text) {
+    const countEl = document.getElementById('aw-snap-count');
+    if (countEl) countEl.textContent = text ?? '';
+}
+
+// ---------------------------------------------------------------------------
 // 渲染
 // ---------------------------------------------------------------------------
 
@@ -522,8 +578,43 @@ function bindEvents(el) {
     el.querySelector('#aw-run')?.addEventListener('click', () => {
         mountOptions.onRun?.();
     });
+
     el.querySelector('#aw-stop')?.addEventListener('click', () => {
         mountOptions.onStop?.();
+    });
+
+    // 版本历史。列表是动态画的，所以恢复/删除走事件委托 ——
+    // 每次重画之后不需要重新挂监听。
+    el.querySelector('#aw-snap-save')?.addEventListener('click', () => {
+        const labelBox = el.querySelector('#aw-snap-label');
+        const label = String(labelBox?.value ?? '').trim();
+        const ok = mountOptions.saveHistory?.(label);
+        if (ok && labelBox) labelBox.value = '';
+        renderHistoryList();
+    });
+
+    el.querySelector('#aw-snap-refresh')?.addEventListener('click', () => {
+        renderHistoryList();
+    });
+
+    el.querySelector('#aw-snap-clear')?.addEventListener('click', () => {
+        mountOptions.clearHistory?.();
+        renderHistoryList();
+    });
+
+    el.querySelector('#aw-snap-list')?.addEventListener('click', (event) => {
+        const restoreBtn = event.target.closest?.('.aw-snap-restore');
+        if (restoreBtn) {
+            const id = restoreBtn.dataset.id;
+            mountOptions.restoreHistory?.(id);
+            renderHistoryList();
+            return;
+        }
+        const delBtn = event.target.closest?.('.aw-snap-del');
+        if (delBtn) {
+            mountOptions.deleteHistory?.(delBtn.dataset.id);
+            renderHistoryList();
+        }
     });
 
     // 自检与连通性测试由 index.js 注入，避免 panel 依赖 diagnostics
@@ -766,7 +857,7 @@ export function unmountPanel() {
  *
  * 之前这里只放了 placeholder，面板打开是空的 —— 看起来像"没有默认提示词"。
  */
-function fillPromptEditors(el, settings) {
+export function fillPromptEditors(el, settings) {
     if (!settings) return;
 
     const critic = el.querySelector('#aw-critic-prompt');
@@ -833,6 +924,7 @@ const PANEL_HTML = `
     <div class="aw-tabs" role="tablist">
         <button class="aw-tab" data-tab="params">参数</button>
         <button class="aw-tab" data-tab="prompts">提示词</button>
+        <button class="aw-tab" data-tab="history">版本</button>
         <button class="aw-tab" data-tab="output">输出</button>
         <button class="aw-tab" data-tab="log">日志</button>
     </div>
@@ -912,6 +1004,34 @@ const PANEL_HTML = `
             <div class="aw-card">
                 <div class="aw-card-title">改写提示词</div>
                 <textarea id="aw-rewrite-prompt" rows="14"></textarea>
+            </div>
+        </section>
+
+        <section class="aw-tab-panel" data-panel="history" hidden>
+            <div class="aw-note">
+                设置现在是**改一下就自动存**的 —— 方便，但手滑了就没法回头。<br>
+                这里给你两层后悔药：<b>自动快照</b>在每次改动**之前**留一份旧值；
+                <b>手动快照</b>是你自己打的时间点。<br>
+                <b>恢复之前会自动再存一份当前值</b>，所以恢复错了还能再恢复回来。
+            </div>
+
+            <div class="aw-card">
+                <div class="aw-card-title">存一份快照</div>
+                <p class="aw-hint">给这次留个名字（可留空）。以后列表里靠它认出来。</p>
+                <div class="aw-row">
+                    <input type="text" id="aw-snap-label" placeholder="例如：调好的温度 + 提示词" style="flex:1;min-width:120px;">
+                    <button id="aw-snap-save" class="aw-btn aw-btn-primary">保存快照</button>
+                </div>
+                <div class="aw-row">
+                    <button id="aw-snap-refresh" class="aw-btn">刷新列表</button>
+                    <button id="aw-snap-clear" class="aw-btn aw-btn-danger">清空全部历史</button>
+                    <span class="aw-stat" id="aw-snap-count"></span>
+                </div>
+            </div>
+
+            <div class="aw-card">
+                <div class="aw-card-title">历史</div>
+                <div id="aw-snap-list" class="aw-snap-list"></div>
             </div>
         </section>
 

@@ -225,11 +225,28 @@ export function getSettings() {
 let saveTimer = null;
 
 /**
+ * 设置变化的旁路通知。
+ *
+ * 存在的理由：版本历史（history.js）需要在**每次改动之后、马上**知道
+ * 「刚有人动过设置」，好把改动之前的样子留档。而 history.js 要 import
+ * config.js，config.js 不能反过来 import 它（会成环），所以这里开个口子，
+ * 由 index.js 在启动时接上。
+ *
+ * 这个回调不能影响保存本身 —— 它抛错也只是少一份快照，
+ * 绝不能让「存设置」失败。
+ */
+let changeListener = null;
+
+export function onSettingsChange(fn) {
+    changeListener = typeof fn === 'function' ? fn : null;
+}
+
+/**
  * 保存设置。
  * 防抖 600ms —— saveSettingsDebounced 本身也防抖，但面板是逐字符 input 触发的，
  * 这里再收一道，避免打字时疯狂排队。
  */
-export function saveSettings({ immediate = false } = {}) {
+export function saveSettings({ immediate = false, reason = '' } = {}) {
     const doSave = () => {
         try {
             context()?.saveSettingsDebounced?.();
@@ -237,6 +254,13 @@ export function saveSettings({ immediate = false } = {}) {
             console.warn('[AgentWriter] 保存设置失败', e);
         }
     };
+
+    // 先通知（此时内存里的值已经是改过之后的，快照逻辑自己持有「改动前」的基准）
+    try {
+        changeListener?.(reason);
+    } catch (e) {
+        console.warn('[AgentWriter] 设置变化通知出错（只影响版本历史）', e);
+    }
 
     if (immediate) {
         clearTimeout(saveTimer);

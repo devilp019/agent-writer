@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.8.26';
+const VERSION = '0.8.27';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.8.26';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.26';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.26';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.8.27';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.27';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.27';
 import {
     mountPanel,
     unmountPanel,
@@ -27,13 +27,34 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.8.26';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.26';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.26';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.26';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.26';
-import { patchFetch } from './stream-hook.js?v=0.8.26';
-import * as notice from './notice.js?v=0.8.26';
+    renderHistoryList,
+    renderStageCards,
+    fillPromptEditors,
+} from './ui/panel.js?v=0.8.27';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.27';
+import {
+    getSettings,
+    saveSettings,
+    onSettingsChange,
+    DEFAULT_CRITIC_PROMPT,
+    DEFAULT_REWRITE_PROMPT,
+} from './config.js?v=0.8.27';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.27';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.27';
+import { patchFetch } from './stream-hook.js?v=0.8.27';
+import {
+    listSnapshots,
+    pushSnapshot,
+    deleteSnapshot,
+    clearSnapshots,
+    restoreSnapshot,
+    diffSettings,
+    describeSnapshot,
+    pickSnapshotData,
+    markBaseline,
+    noteChange,
+} from './history.js?v=0.8.27';
+import * as notice from './notice.js?v=0.8.27';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -379,6 +400,16 @@ function startUI() {
         checkTavernHelper(settings);
         recoverSlotsOnBoot(settings);
 
+        // 版本历史：先把现在这一份当基准，之后每次改动都会把「改动之前」
+        // 存下来。挂在 saveSettings 的通知上，所以不管从哪条路改（面板、
+        // 以后的其它入口）都盖得到。
+        markBaseline();
+        onSettingsChange((reason) => {
+            // 写历史自己也会走一次 saveSettings，那不是用户改了设置
+            if (reason === 'history') return;
+            noteChange('auto');
+        });
+
         // 两个都没成，说明环境本身有问题，别让用户对着空白界面猜
         if (!fabOk && !menuOk) {
             reportFatal('挂载界面', new Error('悬浮球和菜单项都没能挂上，请把这条信息截图'));
@@ -481,6 +512,61 @@ async function recoverSlotsOnBoot(settings) {
 }
 
 /**
+ * 把快照里的内容摊成人能看的文本。
+ *
+ * 只给「这份里存了什么」那个折叠框用 —— 差异列表已经答了「和现在差在哪」，
+ * 这里答的是「这份到底是什么」。
+ */
+function summarizeSnapshotData(data) {
+    if (!data || typeof data !== 'object') return '(空)';
+    const lines = [];
+    lines.push(`自动模式：${data.auto ? '开' : '关'}`);
+    lines.push(`总开关：${data.enabled === false ? '停用' : '启用'}`);
+
+    for (const [stage, title] of [['critic', '② 校验'], ['final', '③ 改写']]) {
+        const s = data[stage];
+        if (!s) continue;
+        lines.push('');
+        lines.push(`── ${title} ──`);
+        lines.push(`槽位名：${s.slotName || '(未填)'}`);
+        lines.push(`渠道：${s.apiUrl ? s.apiUrl : (s.proxyPreset ? `代理预设 ${s.proxyPreset}` : '用当前连接')}`);
+        lines.push(`密钥：${s.apiKey ? `已设置（${String(s.apiKey).slice(0, 4)}…，${String(s.apiKey).length} 位）` : '(空)'}`);
+        lines.push(`模型：${s.model || '(不覆盖)'}`);
+        lines.push(`温度 / 最大长度：${s.temperature} / ${s.maxTokens}`);
+        lines.push(`流式：${s.useStream === false ? '关' : '开'}`);
+        lines.push(`附加请求体：${(s.bodyFieldsRaw ?? '').trim() || '(空)'}`);
+        lines.push(`提示词：${(s.systemPrompt ?? '').length} 字`);
+        lines.push(`  开头：${String(s.systemPrompt ?? '').slice(0, 60).replace(/\n/g, ' ')}…`);
+    }
+    return lines.join('\n');
+}
+
+/**
+ * 恢复快照之后，把面板上的控件全部刷成新值。
+ *
+ * 少了这一步，界面还显示着旧值 —— 你会以为恢复没生效，然后再点一次，
+ * 那就真的乱了。
+ */
+function refreshAllControls(settings) {
+    const panel = document.getElementById('aw-panel');
+    if (!panel) return;
+    try {
+        renderStageCards(panel, settings);
+    } catch (e) {
+        console.warn('[AgentWriter] 刷新阶段控件失败', e);
+    }
+    try {
+        fillPromptEditors(panel, settings);
+    } catch (e) {
+        console.warn('[AgentWriter] 刷新提示词失败', e);
+    }
+    try {
+        const autoBox = getAutoCheckbox();
+        if (autoBox) autoBox.checked = !!settings.auto;
+    } catch { /* 尽力而为 */ }
+}
+
+/**
  * 挂载面板。
  *
  * 这个函数必须和 startUI() 分开：之前它被塞在带 `started` 闸门的 boot() 里，
@@ -523,25 +609,75 @@ function mountPanelOnce() {
                 saveSettings();
             },
             onPromptRestore: () => {
+                // 「恢复默认提示词」是这个面板上最容易后悔的一下 ——
+                // 手动改了很久的提示词会被一次覆盖掉，而且那一下常常是误触。
+                // 所以先**立刻**存一份当前的（不走防抖），再覆盖。
+                pushSnapshot({ reason: 'before-reset', label: '恢复默认提示词之前' });
+
                 const s = getSettings();
                 s.critic.systemPrompt = DEFAULT_CRITIC_PROMPT;
                 s.final.systemPrompt = DEFAULT_REWRITE_PROMPT;
                 saveSettings({ immediate: true });
+                markBaseline();
+
                 const panel = document.getElementById('aw-panel');
                 const critic = panel?.querySelector('#aw-critic-prompt');
                 const rewrite = panel?.querySelector('#aw-rewrite-prompt');
                 if (critic) critic.value = DEFAULT_CRITIC_PROMPT;
                 if (rewrite) rewrite.value = DEFAULT_REWRITE_PROMPT;
-                log('已恢复默认提示词');
+                log('已恢复默认提示词（改之前的样子已存进「版本」页，能回退）');
+            },
+            // ---------- 版本历史 ----------
+            listHistory: () => listSnapshots().map((item) => ({
+                id: item.id,
+                when: describeSnapshot(item),
+                summary: summarizeSnapshotData(item.data),
+                // 「这份和现在差在哪」——注意方向：列出的是两份之间的差异，
+                // 点「恢复」之后你会从**现在**变成**这份**。
+                diff: diffSettings(item.data, pickSnapshotData(getSettings())),
+            })),
+            historyDiff: (entry) => entry.diff ?? [],
+            saveHistory: (label) => {
+                const item = pushSnapshot({ reason: 'manual', label });
+                if (item) {
+                    log(`已存快照${label ? `「${label}」` : ''}`);
+                } else {
+                    log('当前设置和最新一份快照一样，没重复存');
+                }
+                return !!item;
+            },
+            restoreHistory: (id) => {
+                const result = restoreSnapshot(id);
+                if (!result.ok) {
+                    log(`恢复失败：${result.error}`);
+                    return false;
+                }
+                // 恢复完必须把面板控件同步成新的值，否则界面还显示旧值，
+                // 你会以为没生效、然后再点一次
+                refreshAllControls(getSettings());
+                log(`已恢复到 ${describeSnapshot(result.applied)}`
+                    + (result.backup ? '（恢复前的样子也存了一份，能撤销）' : ''));
+                return true;
+            },
+            deleteHistory: (id) => {
+                log(deleteSnapshot(id) ? '已删掉那份快照' : '那份快照已经不在了');
+            },
+            clearHistory: () => {
+                clearSnapshots();
+                log('版本历史已清空');
             },
             onBeforeShow: () => {
                 // 面板显示的提示词必须就是配置里那一份
                 refreshPrompts(getSettings());
+                // 版本列表也要重画：面板关着的那段时间可能改过设置
+                renderHistoryList();
             },
             onTabChange: (tab) => {
                 const s = getSettings();
                 s.ui = { ...s.ui, tab };
                 saveSettings();
+                // 切到「版本」页时重画一次 —— 列表要反映刚刚发生的改动
+                if (tab === 'history') renderHistoryList();
             },
         });
     } catch (err) {
@@ -560,6 +696,7 @@ function mountPanelOnce() {
         const autoBox = getAutoCheckbox();
         if (autoBox) autoBox.checked = !!settings.auto;
         setState(idleState(settings));
+        renderHistoryList();
 
         log('提示：「参数」页可点「运行自检」；「输出」页看 ①②③ 的结果');
 
