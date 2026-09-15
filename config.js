@@ -106,6 +106,8 @@ function stageDefaults(overrides) {
         /** 校验阶段可见的聊天楼层数 */
         contextDepth: 6,
         includeCharCard: true,
+        /** 是否注入世界书已激活的条目（校验「违反设定」必须有它） */
+        includeWorldInfo: true,
         ...overrides,
     };
 }
@@ -136,6 +138,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
         temperature: 1.0,
         useStream: true,
         autoRetryOnEmpty: true,
+        includeCharCard: true,
+        includeWorldInfo: true,
         systemPrompt: DEFAULT_REWRITE_PROMPT,
         overridePayload: { thinking: { type: 'disabled' } },
     }),

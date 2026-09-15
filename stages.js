@@ -1,26 +1,32 @@
 /**
  * Agent Writer - 阶段上下文拼装
  *
- * 关键设计：校验者与改写者看到的上下文是**受控的**，不是整份预设。
+ * 两个硬约束：
  *
- * 原因：把整份 RP 预设喂给校验者，它会被「推进剧情」「扮演角色」这类指令带跑，
- * 提示词里写再多「最高优先级」都在跟上下文打架 —— 这正是思维链跑偏的根源。
- * 校验者只需要：指令 + 角色卡摘要 + 最近几楼 + 草稿。
+ * 1. **世界书必须注入。**
+ *    校验者要判断「是否违反世界观设定」，就必须看得到世界书条目。
+ *    好在酒馆通过 getContext() 暴露了 getWorldInfoPrompt()，不用自己扫描。
+ *
+ * 2. **前缀必须跨阶段保持一致。**
+ *    部分上游（以及酒馆自己的缓存机制）靠前缀匹配复用缓存。
+ *    如果两个阶段的 system 前缀不同，即使打同一个后端也永远命中不了。
+ *    所以这里把「设定」做成一个**逐字节相同**的共享前缀，
+ *    各阶段只在后面的 user 消息里写自己的指令。
  */
 
-import { CRITIQUE_SCHEMA } from './config.js?v=0.4.2';
+import { CRITIQUE_SCHEMA } from './config.js?v=0.5.0';
 
-/** 把校验 schema 渲染成提示词里的文字说明，让模型知道要输出什么 */
+/** 把校验 schema 渲染成提示词里的文字说明 */
 export function describeSchema() {
     return JSON.stringify(CRITIQUE_SCHEMA.value, null, 2);
 }
 
-/** 从角色卡取一份精简摘要，只保留校验需要的部分 */
+/** 从角色卡取一份精简摘要 */
 function charCardDigest(ctx) {
     try {
         const fields = ctx.getCharacterCardFields?.({}) ?? {};
         const parts = [];
-        const push = (label, value, limit = 1200) => {
+        const push = (label, value, limit = 1500) => {
             const text = String(value ?? '').trim();
             if (!text) return;
             parts.push(`【${label}】\n${text.length > limit ? `${text.slice(0, limit)}…` : text}`);
@@ -37,15 +43,112 @@ function charCardDigest(ctx) {
 }
 
 /**
- * 取最近 N 楼，转成 role/content 形式。
+ * 触发世界书扫描，拿到已激活的条目。
  *
- * 必须排除草稿本身所在的楼层 —— 否则草稿会先作为「最近历史」发一遍，
- * 后面又作为【草稿】发一遍，同一段文本重复出现。
- *
- * @param {object} ctx
- * @param {number} depth
- * @param {number} excludeIndex 要排除的楼层号（草稿所在层）
+ * getWorldInfoPrompt 的 chat 参数按「深度递增」排列，即 index 0 是最近一楼。
+ * 签名可能随版本变化，所以对参数个数做一次兼容尝试。
  */
+async function scanWorldInfo(ctx, chatStrings) {
+    const fn = ctx.getWorldInfoPrompt;
+    if (typeof fn !== 'function') {
+        console.warn('[AgentWriter] getWorldInfoPrompt 不可用，校验者将看不到世界书');
+        return null;
+    }
+
+    const maxContext = Number(ctx.maxContext) || 8192;
+
+    try {
+        return await fn.call(ctx, chatStrings, maxContext, true);
+    } catch (e) {
+        console.warn('[AgentWriter] 世界书扫描失败（试旧签名）', e?.message ?? e);
+        try {
+            return await fn.call(ctx, chatStrings, true);
+        } catch (e2) {
+            console.warn('[AgentWriter] 世界书扫描失败', e2?.message ?? e2);
+            return null;
+        }
+    }
+}
+
+/** 把深度条目渲染成可插入的文本 */
+function renderDepthEntries(entries) {
+    const out = [];
+    for (const entry of entries ?? []) {
+        const content = typeof entry === 'string'
+            ? entry
+            : String(entry?.content ?? entry?.mes ?? '').trim();
+        if (content) out.push(content);
+    }
+    return out.join('\n\n');
+}
+
+/**
+ * 组装「共享前缀」。
+ *
+ * 这个前缀在两个阶段里**逐字节一致**，是缓存能命中的前提。
+ * 所以任何阶段特有的内容都不能放进来。
+ *
+ * 只扫描一次，两处复用 —— 顺带避免重复触发世界书递归扫描的副作用。
+ */
+let prefixCache = null;
+
+export function invalidatePrefixCache() {
+    prefixCache = null;
+}
+
+async function buildSharedPrefix(ctx, { includeCharCard, includeWorldInfo }) {
+    // 缓存键只看「内容构成」，与阶段无关 ——
+    // 两个阶段必须拿到同一份前缀，否则缓存永远命中不了。
+    const cacheKey = `wi=${includeWorldInfo ? 1 : 0};cc=${includeCharCard ? 1 : 0}`;
+
+    if (prefixCache && prefixCache.key === cacheKey) {
+        return prefixCache.value;
+    }
+
+    const blocks = [];
+    let depthText = '';
+
+    if (includeWorldInfo) {
+        const chat = ctx.chat ?? [];
+        // index 0 = 最近一楼，逐层往前
+        const chatStrings = [];
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const mes = chat[i]?.mes;
+            if (typeof mes === 'string' && mes.trim()) chatStrings.push(mes);
+        }
+
+        const wi = await scanWorldInfo(ctx, chatStrings);
+        const before = String(wi?.worldInfoBefore ?? '').trim();
+        const after = String(wi?.worldInfoAfter ?? '').trim();
+        depthText = renderDepthEntries(wi?.worldInfoDepth);
+
+        if (before) blocks.push(`【世界观设定】\n${before}`);
+        if (after) blocks.push(`【补充设定】\n${after}`);
+
+        if (!before && !after && !depthText) {
+            console.log('[AgentWriter] 本次没有世界书条目被激活');
+        } else {
+            console.log(`[AgentWriter] 世界书已注入：before ${before.length} 字 / after ${after.length} 字 / 深度 ${depthText.length} 字`);
+        }
+    }
+
+    if (includeCharCard) {
+        const digest = charCardDigest(ctx);
+        if (digest) blocks.push(`【角色设定】\n${digest}`);
+    }
+
+    const value = { prefix: blocks.join('\n\n'), depthText };
+    prefixCache = { key: cacheKey, value };
+    return value;
+}
+
+/** 两个阶段必须一字不差的中间段，放在共享前缀之后 */
+const SHARED_ROLE = [
+    '你是一个 RP 文本流水线中的助手。流水线分两步：先校验草稿的逻辑问题，再按校验意见改写。',
+    '你的输出只服务于这条流水线，不参与角色扮演，也不要续写剧情。',
+].join('\n');
+
+/** 取最近 N 楼，转成 role/content。排除 excludeIndex（草稿所在层） */
 function recentMessages(ctx, depth, excludeIndex) {
     const n = Number(depth);
     if (!Number.isFinite(n) || n <= 0) return [];
@@ -66,33 +169,34 @@ function recentMessages(ctx, depth, excludeIndex) {
 
 /**
  * ② 校验阶段的完整消息数组。
- * @param {object} options
- * @param {object} options.settings 已解析的阶段设置
- * @param {string} options.draft 草稿正文
- * @param {number} options.draftIndex 草稿所在楼层（会被排除出历史）
- * @param {object} options.ctx SillyTavern context
+ *
+ * 结构（前两段与 ③ 完全一致，供缓存命中）：
+ *   [0] 共享前缀（世界书 + 角色卡）   ← 与 ③ 相同
+ *   [1] 共享角色说明                  ← 与 ③ 相同
+ *   [2..] 历史 + 校验指令 + 草稿       ← 阶段特有
  */
-export function buildCriticMessages({ settings, draft, draftIndex, ctx }) {
-    const messages = [{ role: 'system', content: settings.systemPrompt }];
+export async function buildCriticMessages({ settings, draft, draftIndex, ctx }) {
+    const shared = await buildSharedPrefix(ctx, {
+        includeCharCard: settings.includeCharCard !== false,
+        includeWorldInfo: settings.includeWorldInfo !== false,
+    });
 
-    if (settings.includeCharCard) {
-        const digest = charCardDigest(ctx);
-        if (digest) {
-            messages.push({ role: 'system', content: `以下是本场景的设定，校验时以此为准：\n\n${digest}` });
-        }
-    }
+    const messages = [];
+
+    if (shared.prefix) messages.push({ role: 'system', content: shared.prefix });
+    messages.push({ role: 'system', content: SHARED_ROLE });
 
     const history = recentMessages(ctx, settings.contextDepth, draftIndex);
     if (history.length) {
-        messages.push({ role: 'system', content: '以下是草稿之前的对话，用于判断前后一致性：' });
-        messages.push(...history);
+        const head = [];
+        head.push({ role: 'system', content: '以下是草稿之前的对话（按时间顺序）：' });
+        if (shared.depthText) head.push({ role: 'system', content: shared.depthText });
+        messages.push(...head, ...history);
     }
 
-    // 输出格式写进提示词本身，而不是依赖上游支持 response_format。
-    // 草稿只出现一次 —— 历史里已经排除了草稿所在楼层。
-    //
-    // 关于格式：不强制 JSON。之前的 `[Object]` 问题是模型把嵌套对象直接拼进
-    // 正文导致的，只要顶层保持扁平就不会有这个问题。所以只要求纯文本清单。
+    messages.push({ role: 'system', content: settings.systemPrompt });
+
+    // 草稿只出现一次 —— 历史里已经排除了草稿所在楼层
     messages.push({
         role: 'user',
         content: [
@@ -112,27 +216,31 @@ export function buildCriticMessages({ settings, draft, draftIndex, ctx }) {
 
 /**
  * ③ 改写阶段的完整消息数组。
- * @param {object} options
- * @param {object} options.settings
- * @param {string} options.draft
- * @param {string} options.critiqueText 已渲染成清单的修改意见
+ *
+ * 前两段与 ② 完全一致；之后换成改写任务。
+ * 两个阶段打同一后端时，长前缀可以被复用。
  */
-export function buildRewriteMessages({ settings, draft, critiqueText }) {
-    return [
-        { role: 'system', content: settings.systemPrompt },
-        {
-            role: 'user',
-            content: `【草稿】\n${draft}\n\n【修改意见】\n${critiqueText}\n\n请输出修改后的正文。`,
-        },
-    ];
+export async function buildRewriteMessages({ settings, draft, critiqueText, ctx }) {
+    const shared = await buildSharedPrefix(ctx, {
+        includeCharCard: settings.includeCharCard !== false,
+        includeWorldInfo: settings.includeWorldInfo !== false,
+    });
+
+    const messages = [];
+
+    if (shared.prefix) messages.push({ role: 'system', content: shared.prefix });
+    messages.push({ role: 'system', content: SHARED_ROLE });
+    messages.push({ role: 'system', content: settings.systemPrompt });
+
+    messages.push({
+        role: 'user',
+        content: `【草稿】\n${draft}\n\n【修改意见】\n${critiqueText}\n\n请输出修改后的正文。`,
+    });
+
+    return messages;
 }
 
-/**
- * 把校验结果渲染成带编号的清单。
- *
- * 比塞一大段散文意见更精准：每条都带 severity、原文引用和具体改法，
- * 改写者可以逐条对照，不容易漏也不容易改过头。
- */
+/** 把校验结果渲染成带编号的清单 */
 export function renderCritique(parsed) {
     if (!parsed || typeof parsed !== 'object') return '';
 
@@ -152,10 +260,8 @@ export function renderCritique(parsed) {
 }
 
 /**
- * 尽最大努力把模型输出解析成结构化校验结果。
- *
- * 模型有时会把 JSON 包在 ```json 里，或在前后多写几句解释。
- * 解析失败不抛错 —— 返回 null，让调用方决定是中止还是降级。
+ * 尽最大努力把校验输出解析成结构化结果。
+ * 默认提示词走纯文本，所以解析失败是正常路径，不算错误。
  */
 export function parseCritique(text) {
     const raw = String(text ?? '').trim();
@@ -185,17 +291,11 @@ export function parseCritique(text) {
 export function looksCleanText(text) {
     const raw = String(text ?? '').trim();
     if (!raw) return false;
-    // 「无需修改」这类回话通常很短，不会夹带别的内容
     if (raw.length > 60) return false;
     return /无需修改|没有问题|无问题|不用修改|no\s*issues?/i.test(raw);
 }
 
-/**
- * 校验结果是否表示「不用改」。
- *
- * 支持两种形态：结构化（issues 为空 / verdict 无需修改）和纯文本（"无需修改"）。
- * 默认提示词走的是纯文本，所以后者才是主路径。
- */
+/** 校验结果是否表示「不用改」。支持结构化与纯文本两种形态 */
 export function isClean(parsed, rawText = '') {
     if (parsed) {
         const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
@@ -208,21 +308,14 @@ export function isClean(parsed, rawText = '') {
 /**
  * 校验输出是否明显跑飞了。
  *
- * 注意：这里**不要求校验者输出 JSON**。
- * 要求结构化输出的唯一理由是原来的 `[Object]` 问题 —— 模型把嵌套对象
- * 直接拼进了正文，酒馆渲染时就变成一堆没意义的 `[Object]`。
- * 所以输出保持扁平即可，不必强制 JSON。
- *
- * 真正要拦的是「跑飞」：解析不出结构、条数离谱、或总字数失控。
- * 那段垃圾一旦被当成「修改意见」喂给改写者，终稿就等于草稿甚至更糟 ——
- * 而且整个过程看起来是「成功」的。
+ * 不要求 JSON —— 要求结构化输出的唯一理由是 `[Object]` 问题
+ * （模型把嵌套对象拼进了正文），只要顶层保持扁平就不会有。
+ * 这里只拦「跑飞」：长到失控。
  */
 export function looksRunaway(text, parsed, { maxChars = 6000, maxIssues = 40 } = {}) {
     const raw = String(text ?? '').trim();
-
     if (!raw) return '校验输出为空';
 
-    // 解析不出结构也可以接受 —— 但只要长到失控就一定是跑飞了
     if (!parsed) {
         return raw.length > maxChars
             ? `校验输出无法解析为结构化结果，且有 ${raw.length} 字（上限 ${maxChars}）`

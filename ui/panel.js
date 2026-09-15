@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.4.2';
+import { demoState } from '../state.js?v=0.5.0';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -78,6 +78,11 @@ function stageFieldsHTML(stage, settings) {
             </label>
         </div>
         <label class="aw-switch aw-switch-block">
+            <input type="checkbox" id="${id('worldinfo')}" ${s.includeWorldInfo !== false ? 'checked' : ''}>
+            <span>注入世界书</span>
+            <em class="aw-tip">校验「是否违反世界观设定」必须有它。关闭后校验者只能凭草稿和前文判断。改写阶段沿用同一份设定，以保持前缀一致（缓存友好）。</em>
+        </label>
+        <label class="aw-switch aw-switch-block">
             <input type="checkbox" id="${id('jsonschema')}" ${s.useJsonSchema ? 'checked' : ''}>
             <span>用原生 JSON Schema 约束输出</span>
             <em class="aw-tip">默认关闭：会走酒馆的 response_format，自定义来源未必支持（不支持时上游会报错）。关闭时靠提示词约束格式，更通用。</em>
@@ -119,6 +124,7 @@ function readStage(el, stage, current) {
     if (stage === 'critic') {
         next.contextDepth = parseInt(get('depth')?.value, 10) || 0;
         next.includeCharCard = !!get('charcard')?.checked;
+        next.includeWorldInfo = !!get('worldinfo')?.checked;
         next.useJsonSchema = !!get('jsonschema')?.checked;
     }
 

@@ -24,8 +24,9 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
+    invalidatePrefixCache,
     CRITIQUE_SCHEMA,
-} from './stages.js?v=0.4.2';
+} from './stages.js?v=0.5.0';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -263,13 +264,16 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
         throw new Error('草稿是空的');
     }
 
+    // 世界书激活结果会随对话变化，每次跑流水线重新扫描
+    invalidatePrefixCache();
+
     // 草稿本身先展示（含酒馆原生生成时的思维链）
     report('draft', { phase: 'done', text: draft, reasoning: draftReasoning });
 
     // ---------- ② 校验 ----------
     report('critic', { phase: 'start' });
 
-    const criticMessages = buildCriticMessages({
+    const criticMessages = await buildCriticMessages({
         settings: settings.critic,
         draft,
         draftIndex: messageIndex,
@@ -340,10 +344,11 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
     const critiqueForRewrite = parsed ? renderCritique(parsed) : critiqueText;
     report('final', { phase: 'start' });
 
-    const rewriteMessages = buildRewriteMessages({
+    const rewriteMessages = await buildRewriteMessages({
         settings: settings.final,
         draft,
         critiqueText: critiqueForRewrite,
+        ctx: context,
     });
 
     const finalResult = await runStage('final', settings.final, rewriteMessages, {
