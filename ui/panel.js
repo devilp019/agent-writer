@@ -497,6 +497,11 @@ function bindEvents(el) {
         // 用途：查「改某处设置会不会连带关掉正则」这类联动 —— 改前拍、改后拍。
         window.awSnapshot?.();
     });
+    el.querySelector('#aw-diag-watch')?.addEventListener('click', () => {
+        // 监听 20 秒，报告哪些流式事件真的发生了。
+        // 平板开控制台不方便，而「思维链为什么是空的」只能靠这个判断。
+        window.awWatchStream?.(20);
+    });
     el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
         const model = el.querySelector('#aw-diag-model')?.value ?? '';
         window.awProbeShape?.(model);
@@ -766,6 +771,7 @@ const PANEL_HTML = `
                     <button id="aw-diag-exact" class="aw-btn">用真实参数复现 ②</button>
                     <button id="aw-diag-via-th" class="aw-btn">走酒馆助手跑一次（最接近实跑）</button>
                     <button id="aw-diag-snapshot" class="aw-btn">拍设置快照 / 对比</button>
+                    <button id="aw-diag-watch" class="aw-btn">监听流式事件 20 秒</button>
                 </div>
                 <label class="aw-field">
                     <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>

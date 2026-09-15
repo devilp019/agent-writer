@@ -141,9 +141,62 @@ function takeReasoning() {
     return best;
 }
 
+/**
+ * 读思维链但**不清空** —— 给流式过程中的预览用。
+ *
+ * 为什么需要两个：STREAM_REASONING_DONE 在流式中途就会带着到目前为止的
+ * 思维链触发，那时把它显示出来，用户就能看到「它在思考」。
+ * 用 takeReasoning 会把内容取走，导致最后一次拿不到。
+ */
+function peekReasoning() {
+    let best = '';
+    for (const value of reasonings.values()) {
+        if (value.length > best.length) best = value;
+    }
+    return best;
+}
+
 // ---------------------------------------------------------------------------
 // 单阶段
 // ---------------------------------------------------------------------------
+
+/**
+ * 把密集的流式回调节流成 ~8fps，并保证最后一次一定送达。
+ *
+ * 为什么要节流：酒馆助手的 fully 事件每个分片都来一次，直接写 DOM 在平板上
+ * 会卡。结尾那次必须补发，否则最后几个字可能不显示。
+ *
+ * @param {(info: {text: string, reasoning: string}) => void} emit
+ * @returns {(info: {text: string, reasoning: string}) => void}
+ */
+function makeProgressThrottle(emit, intervalMs = 120) {
+    let last = 0;
+    let pending = null;
+    let timer = null;
+    let latest = null;
+
+    return (info) => {
+        latest = info;
+        const now = Date.now();
+        if (now - last >= intervalMs) {
+            last = now;
+            pending = null;
+            emit(info);
+            return;
+        }
+        pending = info;
+        if (timer) return;
+        timer = setTimeout(() => {
+            timer = null;
+            if (pending) {
+                last = Date.now();
+                const p = pending;
+                pending = null;
+                emit(p);
+            }
+        }, intervalMs - (now - last));
+    };
+}
 
 /**
  * 跑一个阶段：注入槽位 → 生成 → 还原槽位。
@@ -177,7 +230,13 @@ async function runOneStage({ stage, settings, instruction, generationId, signal,
             stage: settings,
             generationId,
             signal,
-            onProgress: (text) => onProgress?.({ text, reasoning: '' }),
+            // 流式进度可能很密（每个分片一次）。写 DOM 有成本，平板上尤其明显，
+            // 所以节流到 ~8fps。顺便把到目前为止的思维链一起带上 ——
+            // 酒馆在流式中途就会发 STREAM_REASONING_DONE，这样用户能看到它在思考。
+            onProgress: makeProgressThrottle((info) => onProgress?.({
+                text: info?.text ?? '',
+                reasoning: peekReasoning(),
+            })),
         });
 
         // 留档：事件里认领到的那份请求体（没认领到就是 null，本身就是结论）

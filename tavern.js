@@ -638,15 +638,30 @@ export async function tavernGenerate({ stage, generationId, signal, onProgress }
     };
     if (Object.keys(customApi).length > 0) config.custom_api = customApi;
 
-    // 流式进度：直接听酒馆自己的事件，按 generation_id 过滤
+    // 流式进度。
+    //
+    // ⚠️ 必须听酒馆助手自己的事件，**不是** STREAM_TOKEN_RECEIVED。
+    // 那个名字看起来像酒馆的，但酒馆源码里根本没有 emit 它（只有定义：
+    // public/scripts/events.js:74），酒馆助手也不发 —— 挂上去等于死监听，
+    // 症状就是「正文最后一次性蹦出来，过程看不到」。
+    //
+    // 酒馆助手实际发的是（src/function/generate/responseGenerator.ts:103）：
+    //   js_stream_token_received_fully(text, generationId)        —— 累计全文
+    //   js_stream_token_received_incrementally(text, generationId) —— 增量
+    // 用 fully 那个，直接赋值即可，不用自己拼接。
     let unsubscribe = null;
-    if (useStream && typeof ctx?.eventSource?.on === 'function' && ctx.eventTypes?.STREAM_TOKEN_RECEIVED) {
+    if (useStream && typeof ctx?.eventSource?.on === 'function') {
         try {
-            unsubscribe = ctx.eventSource.on(ctx.eventTypes.STREAM_TOKEN_RECEIVED, (text) => {
+            unsubscribe = ctx.eventSource.on('js_stream_token_received_fully', (text, id) => {
+                // id 有就给，没有也认（不同版本可能不带）
+                if (id && generationId && String(id) !== String(generationId)) return;
                 onProgress?.(String(text ?? ''));
             });
         } catch (e) {
-            console.warn('[AgentWriter] 监听流式事件失败', e);
+            console.warn('[AgentWriter] 监听酒馆助手流式事件失败', e);
+        }
+        if (!unsubscribe) {
+            console.warn('[AgentWriter] 没能挂上流式监听，进度不会实时显示');
         }
     }
 

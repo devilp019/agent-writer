@@ -1560,6 +1560,110 @@ export function compareSnapshot() {
     return text;
 }
 
+/**
+ * 监听一段时间内**实际发生**的流式相关事件，把结果打到面板上。
+ *
+ * 为什么需要它：平板上开控制台不方便，而「思维链为什么是空的」这类问题
+ * 只能靠「事件到底有没有发」来判断。之前是靠读源码 + 推理，绕了很久。
+ *
+ * 用法：点按钮 → 在 20 秒内跑一次 ② → 回来看输出。
+ *
+ * @param {number} [seconds]
+ */
+export async function watchStreamEvents(seconds = 20) {
+    const context = ctx();
+    if (!context) {
+        setDiagOutput('getContext() 不可用。');
+        return null;
+    }
+
+    const es = context.eventSource;
+    const et = context.eventTypes;
+    if (!es?.on) {
+        setDiagOutput('eventSource 不可用。');
+        return null;
+    }
+
+    // 想确认存在性的那些事件。带 ★ 的是扩展真正依赖的。
+    const wanted = [
+        ['★ js_stream_token_received_fully', 'js_stream_token_received_fully'],
+        ['  js_stream_token_received_incrementally', 'js_stream_token_received_incrementally'],
+        ['★ STREAM_REASONING_DONE', et?.STREAM_REASONING_DONE],
+        ['  STREAM_TOKEN_RECEIVED（怀疑是死的）', et?.STREAM_TOKEN_RECEIVED],
+        ['  GENERATION_STARTED', et?.GENERATION_STARTED],
+        ['  GENERATION_ENDED', et?.GENERATION_ENDED],
+        ['  CHAT_COMPLETION_SETTINGS_READY', et?.CHAT_COMPLETION_SETTINGS_READY],
+    ].filter(([, name]) => name);
+
+    const hits = new Map();
+    const subs = [];
+    const started = Date.now();
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const elapsed = () => {
+        const s = Math.round((Date.now() - started) / 100) / 10;
+        return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${pad(Math.round(s % 60))} 秒`;
+    };
+
+    const render = () => {
+        const body = [];
+        body.push('=== 流式事件监听 ===');
+        body.push(`（已监听 ${elapsed()}，共 ${seconds} 秒）`);
+        body.push('');
+        for (const [label] of wanted) {
+            const h = hits.get(label);
+            if (!h) {
+                body.push(`  ○ ${label}  —— 没发生`);
+            } else {
+                body.push(`  ● ${label}  —— ${h.count} 次`);
+                if (h.sample) body.push(`      参数: ${h.sample}`);
+            }
+        }
+        body.push('');
+        body.push('怎么看：');
+        body.push('  · ★ 那两个是扩展依赖的。js_stream_token_received_fully 没发生 ⇒ 流式进度必然不动');
+        body.push('  · STREAM_REASONING_DONE 没发生 ⇒ 思维链抓不到（那条路只能靠它）');
+        body.push('  · 看它的参数形状，能判断思维链是在第一个参数里还是在 state 里');
+        setDiagOutput(body.join('\n'));
+        return body.join('\n');
+    };
+
+    for (const [label, name] of wanted) {
+        try {
+            const sub = es.on(name, (...args) => {
+                const prev = hits.get(label) ?? { count: 0, sample: '' };
+                prev.count++;
+                if (!prev.sample) {
+                    prev.sample = args
+                        .map((a) => {
+                            if (typeof a === 'string') return `"${a.slice(0, 60)}"`;
+                            if (a && typeof a === 'object') return `{${Object.keys(a).slice(0, 8).join(',')}}`;
+                            return String(a);
+                        })
+                        .join(' | ');
+                }
+                hits.set(label, prev);
+                render();
+            });
+            subs.push(sub);
+        } catch (e) {
+            console.warn(`[AgentWriter] 挂监听 ${label} 失败`, e);
+        }
+    }
+
+    const first = render();
+    log(`已开始监听 ${seconds} 秒（挂上 ${subs.length} 个事件）。跑一次 ② 后回来看结果。`);
+
+    await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+
+    for (const sub of subs) {
+        try { sub?.stop?.(); } catch { /* 忽略 */ }
+    }
+    const final = render();
+    log('流式事件监听结束');
+    return final || first;
+}
+
 /** 挂到 window，方便不开面板直接调用 */
 export function exposeGlobals() {
     globalThis.awDiagnose = diagnose;
@@ -1572,4 +1676,5 @@ export function exposeGlobals() {
     globalThis.awProbeExact = probeExact;
     globalThis.awProbeViaTh = probeViaTavernHelper;
     globalThis.awSnapshot = compareSnapshot;
+    globalThis.awWatchStream = watchStreamEvents;
 }
