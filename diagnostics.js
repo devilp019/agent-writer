@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.1';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.1';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.2';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.2';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.1');
+        const mod = await import('./pipeline.js?v=0.8.2');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -702,21 +702,29 @@ export async function showLastRequests() {
 }
 
 /**
- * 换渠道专项诊断：比对「酒馆能通的路径」和「扩展正在用的路径」。
+ * 换渠道专项诊断：把「面板里填的明文密钥」按**两种请求形状**送给上游。
  *
- * 背景：同一个 key 在酒馆里能通，但扩展直接打 apiurl 却 401。
- * 这两条路的差别在于：
- *   - 酒馆路径只传 secret_id，密钥由服务端从 secrets 里取
- *   - 扩展路径把密钥明文放进 custom_api.key，由 TH 塞进 Authorization 头
- * 所以要么密钥值不同，要么头没设对。
+ * 背景：同一个 key 在别的扩展里能通，在本扩展里 401。既然直连探针已经
+ * 证明 key 本身没问题，那问题就在「酒馆怎么把这个凭据送出去」这一步。
+ * 这一步有两条不同的路，必须分开测：
  *
- * 这里把两件事分开测，并把两边的密钥指纹打出来比对（只打指纹，不打印密钥本身）。
+ *   形状 A —— 扩展现在用的：custom_api.key
+ *     TavernHelper 的 resolveProxyPreset / applyCustomApiOverrides 会把它
+ *     落到 reverse_proxy + proxy_password 上，由酒馆按厂商分支去设请求头。
+ *
+ *   形状 B —— 织幕（st-end-component-generator）用的：顶层 custom_include_headers
+ *     直接给酒馆一份「要附加哪些请求头」的 YAML，酒馆只负责合并。
+ *     这条路对请求头的控制是精确的，不依赖厂商分支。
+ *
+ * 两个形状都不通 ⇒ 端点在酒馆这条链路上确实不接受这个密钥；
+ * 形状 B 通而 A 不通 ⇒ 就是 custom_api.key 这条路的解析出了问题，改用 B。
  *
  * @param {string} [apiUrl]
  * @param {string} [key]
  * @param {string} [model]
+ * @param {boolean} [useStream]
  */
-export async function probeChannel(apiUrl, key, model) {
+export async function probeChannel(apiUrl, key, model, useStream = false) {
     const context = ctx();
     if (!context) {
         setDiagOutput('getContext() 不可用。');
@@ -730,10 +738,11 @@ export async function probeChannel(apiUrl, key, model) {
         } catch { return null; }
     })();
 
+    // 地址/模型优先用面板里填的 —— 这个诊断是要验证「扩展配的那套」，
+    // 不是验证连接配置里那套。
     const url = String(apiUrl ?? '').trim() || profile?.['api-url'] || '';
     const useModel = String(model ?? '').trim() || profile?.model || '';
     const plainKey = String(key ?? '').trim();
-    const secretId = profile?.['secret-id'] ?? '';
 
     const out = [];
     const say = (s) => { out.push(s); setDiagOutput(out.join('\n')); };
@@ -754,43 +763,24 @@ export async function probeChannel(apiUrl, key, model) {
         }
     };
 
-    say('=== 密钥来源比对 ===');
-    say(`连接配置           ${profile?.name ?? '(无)'}`);
-    say(`api-url            ${url || '(空)'}`);
-    say(`model              ${useModel || '(空)'}`);
-    say(`profile.secret-id  ${secretId || '(无)'}`);
-    say(`面板里填的 key     ${mask(plainKey)}  指纹 ${await hash(plainKey)}`);
+    say('=== 面板填的渠道 ===');
+    say(`API 地址           ${url || '(空 ← 空的话根本不会走换渠道，会掉回当前连接)'}`);
+    say(`模型               ${useModel || '(空)'}`);
+    say(`API 密钥           ${mask(plainKey)}`);
+    say(`  指纹             ${await hash(plainKey)}`);
+    say(`流式               ${useStream ? '开（Cline 必须开：非流式会被包一层 data）' : '关'}`);
     say('');
-
-    // 从酒馆 secrets 里取出服务端实际会用的值，只用来算指纹
-    let serverKey = null;
-    try {
-        const resp = await fetch('/api/secrets/find', {
-            method: 'POST',
-            headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: 'api_key_custom', id: secretId || undefined }),
-        });
-        if (resp.ok) {
-            serverKey = (await resp.json())?.value ?? null;
-        } else {
-            say(`读酒馆密钥失败：HTTP ${resp.status}（可能 allowKeysExposure 没开）`);
-        }
-    } catch (e) {
-        say(`读酒馆密钥出错：${e?.message}`);
+    if (!url || !plainKey) {
+        say('⚠ 地址或密钥是空的。这两个都填上才有意义 ——');
+        say('  密钥为空时酒馆会退回「当前连接」的凭据，于是拿别的密钥去打 Cline，必然 401。');
+        say('');
     }
-
-    if (serverKey) {
-        say(`酒馆里的密钥       ${mask(serverKey)}  指纹 ${await hash(serverKey)}`);
-        say(`⇒ 两者${serverKey === plainKey ? '一致' : '不一致 —— 若是后者，这就是 401 的原因'}`);
-    } else {
-        say('酒馆里的密钥       读不到（只影响比对，不影响下面的直连测试）');
-    }
-    say('');
 
     const messages = [{ role: 'user', content: 'Say OK' }];
 
-    async function attempt(label, body) {
+    async function attempt(label, body, note = '') {
         say(`${label}`);
+        if (note) say(`   ${note}`);
         try {
             const resp = await fetch('/api/backends/chat-completions/generate', {
                 method: 'POST',
@@ -808,9 +798,21 @@ export async function probeChannel(apiUrl, key, model) {
                 say(`   ✘ HTTP ${resp.status}  ${msg}`);
                 return false;
             }
-            const content = parsed?.choices?.[0]?.message?.content ?? parsed?.choices?.[0]?.text ?? parsed?.content ?? '';
-            say(`   ✔ HTTP ${resp.status}  返回: ${JSON.stringify(String(content).slice(0, 60))}`);
-            return true;
+            // 注意 Cline 非流式会把标准结构包一层 data，这里两种都认
+            const inner = parsed?.data ?? parsed;
+            const content = inner?.choices?.[0]?.message?.content
+                ?? inner?.choices?.[0]?.text
+                ?? parsed?.content
+                ?? '';
+            if (typeof content === 'string' && content.trim()) {
+                say(`   ✔ HTTP ${resp.status}  返回: ${JSON.stringify(content.slice(0, 60))}`);
+                return true;
+            }
+            say(`   △ HTTP ${resp.status} 通了，但正文为空`);
+            if (parsed?.data && !parsed?.choices) {
+                say('     （响应被包了一层 data —— 这是 Cline 非流式的特征，换流式就正常）');
+            }
+            return false;
         } catch (e) {
             say(`   抛错: ${e?.message}`);
             return false;
@@ -820,30 +822,58 @@ export async function probeChannel(apiUrl, key, model) {
     }
 
     const base = {
-        stream: false,
+        stream: useStream,
         messages,
         model: useModel,
         chat_completion_source: 'custom',
         custom_url: url,
-        max_tokens: 16,
+        max_tokens: 32,
         use_sysprompt: true,
     };
 
-    say('=== 直连测试 ===');
-    if (secretId) {
-        await attempt('① 服务端取密钥（secret_id）', { ...base, secret_id: secretId });
-    }
-    if (plainKey) {
-        await attempt('② 面板明文密钥（key）', { ...base, key: plainKey });
-    }
-    if (serverKey && serverKey !== plainKey) {
-        await attempt('③ 酒馆里那个密钥的值', { ...base, key: serverKey });
+    const okA = await attempt(
+        '形状 A —— 扩展现在用的：custom_api.key（落成 reverse_proxy + proxy_password）',
+        { ...base, key: plainKey },
+    );
+
+    const okB = await attempt(
+        '形状 B —— 织幕用的：顶层 custom_include_headers 直接指定 Authorization',
+        { ...base, custom_include_headers: `"Authorization": "Bearer ${plainKey}"` },
+    );
+
+    // 顺便看看酒馆里那个密钥是不是同一个（只比指纹）
+    let serverKey = null;
+    try {
+        const resp = await fetch('/api/secrets/find', {
+            method: 'POST',
+            headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'api_key_custom' }),
+        });
+        if (resp.ok) serverKey = (await resp.json())?.value ?? null;
+    } catch { /* 读不到就算了 */ }
+    if (serverKey) {
+        say(`酒馆里存的 api_key_custom   ${mask(serverKey)}  指纹 ${await hash(serverKey)}`);
+        say(`⇒ 与面板里填的${serverKey === plainKey ? '一致' : '**不一致** ← 若形状 A 失败而这条能通，就是它'}`);
+        say('');
+        if (serverKey !== plainKey) {
+            await attempt('形状 A′ —— 改用酒馆里存的密钥值', { ...base, key: serverKey });
+        }
     }
 
-    say('判断方法：');
-    say('  · ① 通、② 不通 ⇒ 面板里填的 key 和酒馆里的不是同一个值');
-    say('  · ③ 通 ⇒ 同上');
-    say('  · ①② 都不通 ⇒ 这个 api-url 不接受这两个密钥');
+    say('=== 判断 ===');
+    if (okA && okB) {
+        say('✔ 两种形状都通 ⇒ 面板这套配置本身没问题，问题在扩展实际发出去的那次请求。');
+        say('  下一步：跑一次 ②，然后点「查看实际请求体」对照。');
+    } else if (!okA && okB) {
+        say('✘ 形状 A 不通、形状 B 通 ⇒ **custom_api.key 这条路解析有问题**。');
+        say('  修法：扩展改用形状 B（顶层 custom_include_headers）来送密钥。');
+    } else if (okA && !okB) {
+        say('△ 形状 A 通、形状 B 不通 —— 少见，把结果发我。');
+    } else {
+        say('✘ 两种形状都不通 ⇒ 酒馆这条链路确实不接受这个密钥。');
+        say('  但如果直连探针（probe-endpoint.mjs）同一个 key 是通的，');
+        say('  那就说明差别在酒馆服务端转发这一层，需要看酒馆后台日志里真正的请求。');
+    }
     log('换渠道诊断完成');
     return out.join('\n');
 }

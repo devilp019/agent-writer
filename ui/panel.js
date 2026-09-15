@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.1';
+import { demoState } from '../state.js?v=0.8.2';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -124,9 +124,18 @@ function readStage(el, stage, current) {
     return next;
 }
 
+/**
+ * 面板里当前两个阶段的配置（由 renderStageCards 维护）。
+ *
+ * 诊断按钮要靠它拿到「用户现在配的这套」，而不是 settings 里那份可能还没保存的。
+ */
+let currentStageState = null;
+
 /** 渲染两个阶段的配置控件并绑定事件 */
 function renderStageCards(el, settings) {
     const state = { critic: { ...settings.critic }, final: { ...settings.final } };
+    // 给诊断按钮用：它要读「面板里现在这套配置」，而这里就是唯一的真相源
+    currentStageState = state;
     const proxyNames = getProxyNames();
 
     if (proxyNames.length === 0) {
@@ -299,7 +308,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.1';
+export const VERSION = '0.8.2';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -423,8 +432,14 @@ function bindEvents(el) {
         window.awProbeSecret?.();
     });
     el.querySelector('#aw-diag-channel')?.addEventListener('click', () => {
-        const get = (n) => globalThis.document.getElementById(n)?.value ?? '';
-        window.awProbeChannel?.(get('aw-critic-apiurl'), get('aw-critic-apikey'), get('aw-critic-model'));
+        // 用面板里 ② 的实际值（含流式开关）—— 这个诊断要验的就是「扩展配的那套」
+        const stage = currentStageState?.critic ?? readStage(el, 'critic', currentStageState?.critic ?? {});
+        window.awProbeChannel?.(
+            stage.apiUrl,
+            stage.apiKey,
+            stage.model,
+            stage.useStream !== false,
+        );
     });
     el.querySelector('#aw-diag-requests')?.addEventListener('click', () => {
         window.awLastRequests?.();
