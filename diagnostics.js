@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.12';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.12';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.13';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.13';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.12');
+        const mod = await import('./pipeline.js?v=0.8.13');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.12 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.13 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.12');
+        const mod = await import('./tavern.js?v=0.8.13');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.12 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.13 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1038,7 +1038,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.12'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.13'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1124,13 +1124,19 @@ export async function probeExact(settings) {
     say('');
 
     const variants = [
-        ['① 去掉 apiurl（诊断自己不发这个字段）', (b) => { delete b.apiurl; }],
-        ['② 去掉 source', (b) => { delete b.source; }],
-        ['③ 去掉 chat_completion_source', (b) => { delete b.chat_completion_source; }],
-        ['④ 去掉 use_sysprompt', (b) => { delete b.use_sysprompt; }],
-        ['⑤ max_tokens 降到 8192', (b) => { b.max_tokens = 8192; }],
-        ['⑥ max_tokens 降到 1024', (b) => { b.max_tokens = 1024; }],
-        ['⑦ temperature 改成 0.3', (b) => { b.temperature = 0.3; }],
+        // 头三条专测「酒馆后端到底认哪种 Authorization 写法」——
+        // 二分到最干净的 body 也失败后，唯一剩下的变量就是它。
+        ['① custom_include_headers 的值改成带 Bearer 前缀',
+            (b) => { b.custom_include_headers = `"Authorization": "Bearer ${stage.apiKey}"`; }],
+        ['② custom_include_headers 的值保持裸 key（当前做法）',
+            (b) => { /* 不动 */ }],
+        ['③ 改用顶层 key 字段（TavernHelper 的旧做法）',
+            (b) => { delete b.custom_include_headers; b.key = stage.apiKey; }],
+        ['④ 用 secret_id 让服务端取密钥',
+            (b) => { delete b.custom_include_headers; }],
+        ['⑤ 去掉 source', (b) => { delete b.source; }],
+        ['⑥ 去掉 chat_completion_source', (b) => { delete b.chat_completion_source; }],
+        ['⑦ 去掉 use_sysprompt', (b) => { delete b.use_sysprompt; }],
         ['⑧ 只留 model + messages + stream + custom_include_headers', (b) => {
             for (const k of Object.keys(b)) {
                 if (!['model', 'messages', 'stream', 'custom_include_headers'].includes(k)) delete b[k];

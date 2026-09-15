@@ -24,7 +24,7 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
-} from './stages.js?v=0.8.12';
+} from './stages.js?v=0.8.13';
 import {
     injectSlot,
     restoreSlot,
@@ -34,7 +34,7 @@ import {
     makePayloadTag,
     takeLastBody,
     recoverSlots,
-} from './tavern.js?v=0.8.12';
+} from './tavern.js?v=0.8.13';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
