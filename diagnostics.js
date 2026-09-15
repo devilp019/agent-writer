@@ -1464,6 +1464,102 @@ export function classifyBackendResponse(text, status = null) {
     return { verdict: 'unknown', status, message: `响应不是 JSON，前 300 字：\n  ${raw.slice(0, 300)}`, raw };
 }
 
+/**
+ * 快照酒馆的关键设置状态，用于「动手前后对比」。
+ *
+ * 为什么需要它：我打算临时改 oai_settings 来换渠道，而用户反馈
+ * 「手动改 API 设置会导致预设的正则被关闭」。原因不明 ——
+ * 正则被关的机制在 regex/index.js:351（applyPresetList 会把不在预设里的
+ * 正则全 disabled），但**是什么触发了它**我没查出来。
+ *
+ * 这种情况下不该推理，该测量：改之前拍一张、改之后再拍一张、对比差异。
+ *
+ * @returns {object|null}
+ */
+export function snapshotSettings() {
+    const context = ctx();
+    if (!context) return null;
+
+    let oai = null;
+    try {
+        oai = context.chatCompletionSettings ?? context.oai_settings ?? null;
+    } catch { /* 读不到 */ }
+
+    let regexState = null;
+    try {
+        const scripts = context.extensionSettings?.regex ?? null;
+        if (Array.isArray(scripts)) {
+            const disabled = scripts.filter((s) => s?.disabled).length;
+            regexState = { total: scripts.length, disabled, enabled: scripts.length - disabled };
+        }
+    } catch { /* 读不到 */ }
+
+    return {
+        chat_completion_source: oai?.chat_completion_source ?? null,
+        custom_url: oai?.custom_url ?? null,
+        custom_model: oai?.custom_model ?? null,
+        preset_settings_openai: oai?.preset_settings_openai ?? null,
+        reverse_proxy: oai?.reverse_proxy ?? null,
+        proxy_password_set: Boolean(oai?.proxy_password),
+        regex: regexState,
+        regex_preset_id: context.extensionSettings?.regex_preset ?? null,
+    };
+}
+
+/**
+ * 打印快照，并和上一次的快照对比。
+ *
+ * 用法：点「拍快照」→ 手动做那个操作（例如改 API 设置）→ 再点一次 → 看差异。
+ */
+let lastSnapshot = null;
+
+export function compareSnapshot() {
+    const now = snapshotSettings();
+    if (!now) {
+        setDiagOutput('读不到酒馆设置。');
+        return null;
+    }
+
+    const out = [];
+    const pretty = (v) => (v === null || v === undefined ? '(无)' : JSON.stringify(v));
+
+    out.push('=== 设置快照 ===');
+    out.push('');
+    for (const [k, v] of Object.entries(now)) {
+        out.push(`  ${k.padEnd(24)} ${pretty(v)}`);
+    }
+    out.push('');
+
+    if (lastSnapshot) {
+        out.push('=== 与上一次快照的差异 ===');
+        out.push('');
+        const keys = new Set([...Object.keys(lastSnapshot), ...Object.keys(now)]);
+        let changed = 0;
+        for (const k of keys) {
+            const a = JSON.stringify(lastSnapshot[k]);
+            const b = JSON.stringify(now[k]);
+            if (a === b) continue;
+            changed++;
+            out.push(`  ✘ ${k}`);
+            out.push(`      之前: ${pretty(lastSnapshot[k])}`);
+            out.push(`      现在: ${pretty(now[k])}`);
+        }
+        if (!changed) out.push('  （没有差异）');
+        out.push('');
+        out.push('如果 regex 的 enabled 数变了，说明那个操作确实动了正则 ——');
+        out.push('  机制在 public/scripts/extensions/regex/index.js:351：');
+        out.push('  applyPresetList 会把「不在当前预设里」的正则全部 disabled。');
+    } else {
+        out.push('（这是第一张快照。现在去做那个操作，然后再点一次对比。）');
+    }
+
+    lastSnapshot = now;
+    const text = out.join('\n');
+    setDiagOutput(text);
+    log('已导出设置快照');
+    return text;
+}
+
 /** 挂到 window，方便不开面板直接调用 */
 export function exposeGlobals() {
     globalThis.awDiagnose = diagnose;
@@ -1475,4 +1571,5 @@ export function exposeGlobals() {
     globalThis.awChannelPlan = dumpChannelPlan;
     globalThis.awProbeExact = probeExact;
     globalThis.awProbeViaTh = probeViaTavernHelper;
+    globalThis.awSnapshot = compareSnapshot;
 }

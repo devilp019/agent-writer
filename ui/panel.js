@@ -492,6 +492,11 @@ function bindEvents(el) {
         // 前面反复「诊断通、实跑不通」，就是因为诊断一直绕过 TavernHelper。
         window.awProbeViaTh?.(readStagesNow().critic);
     });
+    el.querySelector('#aw-diag-snapshot')?.addEventListener('click', () => {
+        // 拍设置快照 / 与上一次对比。
+        // 用途：查「改某处设置会不会连带关掉正则」这类联动 —— 改前拍、改后拍。
+        window.awSnapshot?.();
+    });
     el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
         const model = el.querySelector('#aw-diag-model')?.value ?? '';
         window.awProbeShape?.(model);
@@ -760,6 +765,7 @@ const PANEL_HTML = `
                     <button id="aw-diag-plan" class="aw-btn">看扩展实际发什么</button>
                     <button id="aw-diag-exact" class="aw-btn">用真实参数复现 ②</button>
                     <button id="aw-diag-via-th" class="aw-btn">走酒馆助手跑一次（最接近实跑）</button>
+                    <button id="aw-diag-snapshot" class="aw-btn">拍设置快照 / 对比</button>
                 </div>
                 <label class="aw-field">
                     <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>

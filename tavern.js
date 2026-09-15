@@ -564,25 +564,37 @@ export function buildCustomApi(stage = {}) {
             customApi.custom_include_headers = { Authorization: `Bearer ${apiKey}` };
         }
 
-        // 附加请求体字段走 custom_include_body，**用面板里的原文**。
+        // 附加请求体字段走 custom_include_body，**传解析后的对象**。
         //
-        // 为什么不走事件注入（Object.assign 到 generate_data 顶层）：
-        // 酒馆后端会对请求体做严格 JSON 解析，**把它不认识的字段丢掉**。
-        // 实测 Cline 的 providerOptions 就是这么被丢的（它只影响路由精准度，
-        // 不会导致失败，但用户要它就得保住）。
+        // 为什么必须是对象，不能是字符串：这条链有两层转换 ——
+        //   TavernHelper: generateData.custom_include_body = YAML.stringify(value)
+        //   酒馆后端:      mergeObjectWithYaml(bodyParams, value) → yaml.parse 后 Object.assign
         //
-        // custom_include_body 不会被那样解析 —— 而且这里刻意送「原文」而不是
-        // 序列化后的 JSON：用户如果把 JSON 写得**不严格**（比如带尾逗号），
-        // 酒馆解析失败就会原样发给上游，字段一个不丢。
-        // 这个办法是用户在织幕里用出来的，这里照搬。
+        //   传对象 → stringify 出真正的映射（`thinking:\n  type: enabled`），
+        //            parse 回来是对象，Object.assign 生效 → 字段进请求体 ✅
+        //   传字符串 → stringify 出的是一个**标量**，parse 回来还是字符串，
+        //            `typeof parsedObject === 'object'` 不成立 → **一个字段都不合并** ❌
         //
-        // 代价：没有 schema 保护，写坏了就是发坏了 —— 但那正是用户想要的行为。
+        // 所以「原样发原文」这个想法是行不通的：它会让所有附加字段静默消失。
+        // 解析失败时宁可不发，也不能发一个字符串 —— 后者看起来配了，实际无效。
+        //
+        // 另注：custom_include_body 是**合并**进 bodyParams 的，不是白名单过滤，
+        // 所以不认识的字段（providerOptions 等）也能正常到达上游，不需要绕过解析。
         const rawFields = String(stage.bodyFieldsRaw ?? '').trim();
         if (rawFields && rawFields !== '{}') {
-            customApi.custom_include_body = rawFields;
+            try {
+                const parsed = JSON.parse(rawFields);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    customApi.custom_include_body = parsed;
+                }
+            } catch {
+                // 写坏了就退回对象形态；都没有就不发，让上游用默认值
+                if (Object.keys(stage.bodyFields ?? {}).length > 0) {
+                    customApi.custom_include_body = stage.bodyFields;
+                }
+            }
         } else if (Object.keys(stage.bodyFields ?? {}).length > 0) {
-            // 没有原文（例如程序直接构造的设置）时退回严格 JSON
-            customApi.custom_include_body = JSON.stringify(stage.bodyFields);
+            customApi.custom_include_body = stage.bodyFields;
         }
     } else if (stage.proxyPreset) {
         customApi.proxy_preset = String(stage.proxyPreset).trim();
