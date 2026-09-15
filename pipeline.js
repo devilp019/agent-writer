@@ -31,6 +31,7 @@ import {
     tavernGenerate,
     setPendingPayload,
     clearPendingPayload,
+    makePayloadTag,
     recoverSlots,
 } from './tavern.js?v=0.7.0';
 
@@ -143,13 +144,15 @@ function takeReasoning() {
  */
 async function runOneStage({ stage, settings, instruction, generationId, signal, onProgress }) {
     const slotName = settings.slotName;
-    const tag = `__AW_${generationId}__`;
+    // 标记要真的写进槽位内容，否则 CHAT_COMPLETION_SETTINGS_READY
+    // 那边认不出这份请求，bodyFields（思考开关）会被丢掉。
+    const tag = makePayloadTag(generationId);
     let injected = false;
 
     try {
         if (signal?.aborted) throw Object.assign(new Error('user abort'), { name: 'AbortError' });
 
-        await injectSlot(slotName, instruction);
+        await injectSlot(slotName, instruction, tag);
         injected = true;
 
         // 请求体附加字段走事件注入（provider 私有参数，例如思考开关）

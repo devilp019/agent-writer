@@ -131,10 +131,13 @@ function findSlot(preset, slotName) {
 
 /**
  * 把指令写入槽位，返回还原所需的信息。
+ *
  * @param {string} slotName
  * @param {string} instruction
+ * @param {string} [marker] 请求期唯一标记，会被写进槽位内容
+ *   （见 setPendingPayload —— 事件里认领请求体靠的就是它）
  */
-export async function injectSlot(slotName, instruction) {
+export async function injectSlot(slotName, instruction, marker = '') {
     const api = requireTh();
     const preset = await api.getPreset('in_use');
     const slot = findSlot(preset, slotName);
@@ -148,7 +151,10 @@ export async function injectSlot(slotName, instruction) {
     slotBackups.set(slotName, backup);
     persistBackups();
 
-    slot.content = `${instruction}\n\n${SLOT_MARKER}`;
+    // 标记单独占一行放在末尾：它一定要出现在发出去的 messages 里，
+    // 否则 CHAT_COMPLETION_SETTINGS_READY 那边认不出哪份请求是自己的。
+    const suffix = marker ? `\n${marker}` : '';
+    slot.content = `${instruction}${suffix}\n\n${SLOT_MARKER}`;
     slot.enabled = true;
 
     // render: 'none' —— 每轮都刷新预设界面会抖动，而且会惊动监听预设的脚本
@@ -229,6 +235,11 @@ export async function recoverSlots(slotNames) {
 // 酒馆助手在发出请求前会 emit CHAT_COMPLETION_SETTINGS_READY，
 // 带上即将发送的 generate_data。监听它、认领自己的那次请求、直接改字段。
 // 比走 custom_include_body 可靠（那个要过一遍 YAML 序列化，嵌套对象容易出问题）。
+//
+// ⚠️ 认领的依据是**标记字符串出现在 messages 里**，而事件里拿不到
+// generation_id。所以标记必须真的被写进槽位内容（injectSlot 的 marker 参数）
+// —— 早期版本用的是 `__AW_<generationId>__`，但没有任何地方把它写进请求，
+// 于是每个阶段设置的 bodyFields（思考开关！）都被静默丢弃了。
 // ---------------------------------------------------------------------------
 
 const pendingPayloads = new Map();
@@ -258,6 +269,14 @@ function hookRequestBody() {
     });
 
     console.log('[AgentWriter] 已挂上 CHAT_COMPLETION_SETTINGS_READY');
+}
+
+/**
+ * 生成一个请求期唯一的标记，写进槽位内容供事件里认领请求体。
+ * 用标记而不是 generation_id，是因为事件回调里拿不到 generation_id。
+ */
+export function makePayloadTag(seed) {
+    return `__AW_PAYLOAD_${String(seed ?? Date.now())}__`;
 }
 
 export function setPendingPayload(tag, payload) {
