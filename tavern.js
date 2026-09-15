@@ -365,20 +365,27 @@ export function normalizeChatCompletionsUrl(rawUrl) {
  *
  * 起因：接 Cline 时反复撞同一个 401「Please make sure you're using the latest
  * version of Cline and re-authenticate」。这句话把人引向「去重装 Cline」，
- * 但它其实对应**三种完全不同的原因**，实测各撞过一次：
+ * 但它对应好几种完全不同的原因：
  *
- *   1. 拿错了凭据类型 —— Cline 有两种 token：
+ *   1. **酒馆转发时送的凭据不对**（实测最终就是这个）——
+ *      custom_api.key 会被 TavernHelper 写进 proxy_password（对 custom 源无效）
+ *      和一份它自己拼的 Authorization 头，而那份头上游不认。
+ *      改用顶层 custom_include_headers 后 200。见 buildCustomApi 的注释。
+ *
+ *   2. 拿错了凭据类型 —— Cline 有两种 token：
  *        · API key：app.cline.bot 的 Settings > API Keys 里生成，给脚本用
  *        · 账号 auth token：登录插件/CLI 时自动生成，只给官方客户端用
- *      第三方客户端拿后者调 api.cline.bot 就会被挡。
  *
- *   2. **额度用尽** —— 实测撞到 5 小时额度上限时，Cline 返回的**不是 429**，
- *      而是这个一模一样的 401。同一个 key 前一刻还全部 200，后一刻全 401。
- *      所以看到 401 先别急着换 key，先看额度。
+ *   3. 额度用尽 —— 撞到额度上限时 Cline 返回的**不是 429**，而是这个 401。
  *
- *   3. key 被撤销/失效。
+ *   4. key 被撤销/失效。
  *
- * 分不清这三种，就会一直在「换 key → 还是 401 → 再换 key」里打转。
+ * ⚠️ 别看到 401 就归因于额度。曾经因为「同一个 key 前一刻全 200、后一刻全 401」
+ * 就断定是额度，那是拿时间相邻当因果 —— 后来同一个 key 在直连探针里始终 200、
+ * 在扩展里始终 401，与额度无关。
+ *
+ * 所以提示里先教人**怎么把上游的问题和转发的问题分开**（跑直连探针），
+ * 而不是直接给一个原因。
  */
 export function humanizeUpstreamError(error) {
     const raw = String(error?.message ?? error ?? '').trim();
@@ -389,13 +396,15 @@ export function humanizeUpstreamError(error) {
 
     if (isCline && is401) {
         return new Error(
-            'Cline 拒绝了这次请求（401）。这个报错对应三种不同原因，按顺序排查：\n\n'
-            + '① 额度用尽（最常见）—— Cline 撞到额度上限时返回的就是这个 401，'
-            + '而不是 429。先去 app.cline.bot 看用量和额度。\n'
-            + '② 凭据类型不对 —— Cline 有两种 token：「账号 auth token」（登录插件/CLI 时'
-            + '自动生成，只给官方客户端用）和「API key」（在 app.cline.bot → Settings → '
-            + 'API Keys 里新建，给脚本用）。第三方调用必须用 API key。\n'
-            + '③ key 被撤销或失效。\n'
+            'Cline 拒绝了这次请求（401）。这个报错对应好几种原因，别急着换 key：\n\n'
+            + '① 用直连探针先分清「上游的问题」还是「酒馆转发的问题」：\n'
+            + '   agent-writer-tools/probe-endpoint.mjs，同一个 key 直连如果通，\n'
+            + '   那就不是账号问题，别再去查 Cline。\n'
+            + '② 凭据类型：必须用 app.cline.bot → Settings → API Keys 里生成的\n'
+            + '   API key，不能用登录插件/CLI 时的账号 auth token。\n'
+            + '③ 额度：撞额度上限时 Cline 返回的也是这个 401，不是 429。去 app.cline.bot 看用量。\n'
+            + '④ key 被撤销或失效。\n'
+            + '\n面板里的「换渠道诊断」会把两种送密钥的形状并排测出来。'
             + `\n上游原文：${raw}`,
         );
     }
@@ -426,6 +435,72 @@ export function humanizeUpstreamError(error) {
 }
 
 /**
+ * 把一个阶段的设置编译成 TavernHelper 的 `custom_api`。
+ *
+ * 抽成独立函数是为了让它成为**单一真相源**：tavernGenerate 用它发请求，
+ * 诊断也用它做「不打请求就能看出发的是什么」的展示 —— 两处不可能走偏。
+ *
+ * ---------------------------------------------------------------------------
+ * 密钥走 custom_include_headers，不走 key —— 这是实测出来的，很重要。
+ *
+ * 看 TavernHelper 的 applyCustomApiOverrides（responseGenerator.ts:190）：
+ *
+ *   if (customApi.apiurl) {
+ *     generateData.reverse_proxy  = ...
+ *     generateData.proxy_password = customApi.key || '';     // 对 custom 源无效
+ *     if (chat_completion_source === 'custom') {
+ *       generateData.custom_url = ...
+ *       if (customApi.key) {
+ *         generateData.custom_include_headers =
+ *           overrideCustomAuthorizationHeader(..., customApi.key);  // ← 问题在这
+ *       }
+ *     }
+ *   }
+ *
+ * 传 key 时它会替我们拼一份 Authorization 头，但实测这份头送到 Cline 会被判 401；
+ * 同一个 key 直连、以及「自己给 custom_include_headers」都是 200。
+ * 见 README「上游实测笔记」里形状 A/B 的对照。
+ *
+ * 两个要点，都踩过：
+ *   1. 不能再同时传 key —— 否则 proxy_password 也被设上，行为不可预期。
+ *   2. 值只放**裸 key** —— TavernHelper 会自己拼成 `Bearer ${key}`，
+ *      值里再带一次前缀会变成 "Bearer Bearer sk_..."。
+ * ---------------------------------------------------------------------------
+ *
+ * @param {object} stage 单阶段设置
+ * @returns {object} 可直接放进 generate() config 的 custom_api（空对象 = 用当前连接）
+ */
+export function buildCustomApi(stage = {}) {
+    const customApi = {};
+
+    // 换渠道有两条路，直接地址优先。
+    //
+    // 为什么不用 proxy_preset 打头：酒馆的代理预设是挂在具体厂商下面的
+    // （DeepSeek / Gemini 等），只覆盖该厂商的 base url，没法用来指向
+    // Cline 这类 OpenAI 兼容的自定义端点。apiUrl 才是通用的。
+    const apiKey = String(stage.apiKey ?? '').trim();
+    if (stage.apiUrl) {
+        customApi.apiurl = normalizeChatCompletionsUrl(stage.apiUrl);
+        // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
+        customApi.source = 'custom';
+        if (apiKey) {
+            customApi.custom_include_headers = { Authorization: apiKey };
+        }
+    } else if (stage.proxyPreset) {
+        customApi.proxy_preset = String(stage.proxyPreset).trim();
+        customApi.source = 'custom';
+    }
+
+    if (stage.model) customApi.model = stage.model;
+    if (Number.isFinite(Number(stage.temperature))) customApi.temperature = Number(stage.temperature);
+    if (Number.isFinite(Number(stage.maxTokens)) && Number(stage.maxTokens) > 0) {
+        customApi.max_tokens = Number(stage.maxTokens);
+    }
+
+    return customApi;
+}
+
+/**
  * 跑一次生成。指令由调用方写入槽位，这里只负责调 generate。
  *
  * @param {object} options
@@ -439,60 +514,7 @@ export async function tavernGenerate({ stage, generationId, signal, onProgress }
     const api = requireTh();
     const ctx = settingsApi();
 
-    const customApi = {};
-
-    // 换渠道有两条路，直接地址优先。
-    //
-    // 为什么不用 proxy_preset 打头：酒馆的代理预设是挂在具体厂商下面的
-    // （DeepSeek / Gemini 等），只覆盖该厂商的 base url，没法用来指向
-    // Cline 这类 OpenAI 兼容的自定义端点。apiUrl 才是通用的。
-    //
-    // ---------------------------------------------------------------------
-    // 密钥走 custom_include_headers，不走 key —— 这是实测出来的，很重要。
-    //
-    // 看 TavernHelper 的 applyCustomApiOverrides（responseGenerator.ts:190）：
-    //
-    //   if (customApi.apiurl) {
-    //     generateData.reverse_proxy  = ...
-    //     generateData.proxy_password = customApi.key || '';     // 对 custom 源无效
-    //     if (chat_completion_source === 'custom') {
-    //       generateData.custom_url = ...
-    //       if (customApi.key) {
-    //         generateData.custom_include_headers =
-    //           overrideCustomAuthorizationHeader(..., customApi.key);  // ← 问题在这
-    //       }
-    //     }
-    //   }
-    //
-    // 也就是说传 key 时，它会替我们拼一份 Authorization 头；但实测这份头
-    // 送到 Cline 会被判 401（同样的 key 直连和「自己给 custom_include_headers」
-    // 都是 200）。见 README「上游实测笔记」一节里形状 A/B 的对照。
-    //
-    // 所以这里显式给 custom_include_headers，让酒馆原样合并，不经过那层覆盖。
-    // 注意一旦给了它，后面 `if (customApi.custom_include_headers)` 分支会
-    // 整体替换，优先级高于 key 拼出来的那份 —— 但不能同时给 key，
-    // 否则 proxy_password 也会被设上，行为变得不可预期。
-    // ---------------------------------------------------------------------
-    const apiKey = String(stage.apiKey ?? '').trim();
-    if (stage.apiUrl) {
-        customApi.apiurl = normalizeChatCompletionsUrl(stage.apiUrl);
-        // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
-        customApi.source = 'custom';
-        if (apiKey) {
-            // 值只放裸 key —— TavernHelper 会自己拼成 `Bearer ${key}`，
-            // 这里再加一次前缀会变成 "Bearer Bearer sk_..."。
-            customApi.custom_include_headers = { Authorization: apiKey };
-        }
-    } else if (stage.proxyPreset) {
-        customApi.proxy_preset = String(stage.proxyPreset).trim();
-        customApi.source = 'custom';
-    }
-
-    if (stage.model) customApi.model = stage.model;
-    if (Number.isFinite(Number(stage.temperature))) customApi.temperature = Number(stage.temperature);
-    if (Number.isFinite(Number(stage.maxTokens)) && Number(stage.maxTokens) > 0) {
-        customApi.max_tokens = Number(stage.maxTokens);
-    }
+    const customApi = buildCustomApi(stage);
 
     const useStream = stage.useStream !== false;
 

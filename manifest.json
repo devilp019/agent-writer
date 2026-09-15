@@ -4,7 +4,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "agent-writer",
-    "version": "0.8.3",
+    "version": "0.8.4",
     "homePage": "https://github.com/devilp019/agent-writer",
     "auto_update": false,
     "minimum_client_version": "1.18.0",

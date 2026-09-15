@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.3';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.3';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.4';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.4';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.3');
+        const mod = await import('./pipeline.js?v=0.8.4');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,22 +880,115 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    if (okA && okB) {
-        say('✔ 两种形状都通 ⇒ 面板这套配置本身没问题，问题在扩展实际发出去的那次请求。');
-        say('  下一步：跑一次 ②，然后点「查看实际请求体」对照。');
-    } else if (!okA && okB) {
-        say('✘ 形状 A 不通、形状 B 通 ⇒ **custom_api.key 这条路送出去的凭据不对**。');
-        say('  修法：扩展改用形状 B（顶层 custom_include_headers）送密钥 —— 0.8.3 起已经是这么做的。');
-        say('  如果这里仍然 A 不通 B 通，说明你装的还是旧版。');
-    } else if (okA && !okB) {
-        say('△ 形状 A 通、形状 B 不通 —— 少见，把结果发我。');
+    say('形状 A 是 0.8.4 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('');
+    if (okB) {
+        if (okA) {
+            say('✔ 两种形状都通。B 是现在用的那条，配置没问题。');
+        } else {
+            say('✔ 形状 B 通 —— 这正是扩展现在用的那条路，配置正确。');
+            say('  （形状 A 不通是正常的，它已经不用了，列在这里只为了对照。）');
+        }
+        say('');
+        say('下一步不是继续看这个诊断，而是看扩展**实发**的那次请求：');
+        say('  跑一次 ②，再点「查看实际请求体」，确认 custom_include_headers 带上了 Authorization。');
+    } else if (okA) {
+        say('△ 形状 A 通、形状 B 不通 —— 少见。把结果发我。');
     } else {
-        say('✘ 两种形状都不通 ⇒ 酒馆这条链路确实不接受这个密钥。');
+        say('✘ 形状 B 也不通 ⇒ 酒馆这条链路确实不接受这个密钥。');
         say('  但如果直连探针（probe-endpoint.mjs）同一个 key 是通的，');
         say('  那就说明差别在酒馆服务端转发这一层，需要看酒馆后台日志里真正的请求。');
     }
     log('换渠道诊断完成');
     return out.join('\n');
+}
+
+/**
+ * 显示扩展**实际会构造出来的** custom_api —— 不发任何请求。
+ *
+ * 为什么需要它：换渠道诊断测的是「酒馆接受哪种形状」，那是关于**酒馆**的结论；
+ * 这个函数回答的是另一个问题 ——「**扩展自己**发出去的是哪一种」。
+ * 401 那轮排查里这两个问题被混在一起，绕了很久。
+ *
+ * 用的是 tavern.buildCustomApi，和真正发请求时同一个函数，
+ * 所以这里显示的就是实发内容，不存在「文档和实现走偏」的可能。
+ */
+export async function dumpChannelPlan(settings) {
+    const out = [];
+
+    let buildCustomApi;
+    try {
+        const mod = await import('./tavern.js?v=0.8.4');
+        buildCustomApi = mod.buildCustomApi;
+    } catch (e) {
+        setDiagOutput(`读取失败: ${e?.message}`);
+        return null;
+    }
+    if (typeof buildCustomApi !== 'function') {
+        setDiagOutput('tavern.buildCustomApi 不可用（装的可能是旧版）。');
+        return null;
+    }
+
+    const mask = (v) => {
+        const s = String(v ?? '');
+        if (!s) return '(空)';
+        return s.length <= 12 ? `${s.slice(0, 3)}…${s.slice(-2)}` : `${s.slice(0, 6)}…${s.slice(-4)}`;
+    };
+
+    /** 密钥不能明文打到面板上 */
+    const redact = (api) => {
+        const copy = JSON.parse(JSON.stringify(api));
+        if (copy.custom_include_headers?.Authorization) {
+            const raw = String(copy.custom_include_headers.Authorization);
+            copy.custom_include_headers.Authorization =
+                `${mask(raw.replace(/^Bearer\s+/i, ''))}${/^Bearer\s+/i.test(raw) ? '  ⚠ 带 Bearer 前缀（会被拼成双前缀）' : '（裸 key，正确）'}`;
+        }
+        return copy;
+    };
+
+    out.push('=== 扩展实际会构造的 custom_api（不发请求）===');
+    out.push('');
+
+    for (const stage of ['critic', 'final']) {
+        const label = stage === 'critic' ? '② 校验' : '③ 改写';
+        const s = settings?.[stage];
+        out.push(`--- ${label} ---`);
+        if (!s) {
+            out.push('（读不到该阶段设置）');
+            out.push('');
+            continue;
+        }
+
+        const api = buildCustomApi(s);
+        out.push(`走哪条路: ${s.apiUrl ? '直接地址（形状 B）' : (s.proxyPreset ? '酒馆代理预设' : '当前连接')}`);
+        out.push('custom_api = ' + JSON.stringify(redact(api), null, 2));
+        out.push('');
+
+        if (s.apiUrl && !s.apiKey) {
+            out.push('⚠ 填了地址但没填密钥 —— 酒馆会退回「当前连接」的凭据，');
+            out.push('  拿别的密钥去打这个端点，必然认证失败。');
+            out.push('');
+        }
+        if (api.custom_include_headers?.Authorization?.startsWith?.('Bearer')) {
+            out.push('⚠ Authorization 值里带了 Bearer 前缀，TavernHelper 会再加一次，');
+            out.push('  拼成 "Bearer Bearer ..."。值应该只放裸 key。');
+            out.push('');
+        }
+        if (api.key !== undefined) {
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.4 起应该走 custom_include_headers。');
+            out.push('');
+        }
+    }
+
+    out.push('怎么看：');
+    out.push('  · custom_include_headers.Authorization 应该是「裸 key」');
+    out.push('  · 不该出现 custom_api.key');
+    out.push('  · 地址应该是 base url，/chat/completions 由酒馆补');
+
+    const text = out.join('\n');
+    setDiagOutput(text);
+    log('已导出扩展实际构造的 custom_api');
+    return text;
 }
 
 /** 挂到 window，方便不开面板直接调用 */
@@ -906,4 +999,5 @@ export function exposeGlobals() {
     globalThis.awProbeShape = probeShape;
     globalThis.awLastRequests = showLastRequests;
     globalThis.awProbeChannel = probeChannel;
+    globalThis.awChannelPlan = dumpChannelPlan;
 }
