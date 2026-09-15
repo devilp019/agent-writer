@@ -363,17 +363,22 @@ export function normalizeChatCompletionsUrl(rawUrl) {
 /**
  * 把上游的报错翻译成人能直接照做的提示。
  *
- * 起因：接 Cline 时拿到 401「Please make sure you're using the latest version
- * of Cline and re-authenticate」。这句话把人引向「去重装 Cline」，
- * 但真实原因是**拿错了 token 类型** —— Cline 有两种凭据：
+ * 起因：接 Cline 时反复撞同一个 401「Please make sure you're using the latest
+ * version of Cline and re-authenticate」。这句话把人引向「去重装 Cline」，
+ * 但它其实对应**三种完全不同的原因**，实测各撞过一次：
  *
- *   - API key：在 app.cline.bot 的 Settings > API Keys 里生成，
- *     给脚本/CI 用，可以填进本扩展。密钥形如 cline_xxx
- *   - 账号 auth token：登录 Cline 插件/CLI 时自动生成，
- *     明文挂在 ~/.cline 的配置里，**只给官方客户端用**，
- *     第三方客户端拿它调 api.cline.bot 就会被这个 401 挡掉
+ *   1. 拿错了凭据类型 —— Cline 有两种 token：
+ *        · API key：app.cline.bot 的 Settings > API Keys 里生成，给脚本用
+ *        · 账号 auth token：登录插件/CLI 时自动生成，只给官方客户端用
+ *      第三方客户端拿后者调 api.cline.bot 就会被挡。
  *
- * 所以这里要看的是「报错方认识不认识这个客户端」，而不是「key 对不对」。
+ *   2. **额度用尽** —— 实测撞到 5 小时额度上限时，Cline 返回的**不是 429**，
+ *      而是这个一模一样的 401。同一个 key 前一刻还全部 200，后一刻全 401。
+ *      所以看到 401 先别急着换 key，先看额度。
+ *
+ *   3. key 被撤销/失效。
+ *
+ * 分不清这三种，就会一直在「换 key → 还是 401 → 再换 key」里打转。
  */
 export function humanizeUpstreamError(error) {
     const raw = String(error?.message ?? error ?? '').trim();
@@ -384,11 +389,14 @@ export function humanizeUpstreamError(error) {
 
     if (isCline && is401) {
         return new Error(
-            'Cline 拒绝了这次请求（401）。这通常不是密钥写错，而是用错了凭据类型：'
-            + 'Cline 有两种 token —— 「账号 auth token」（登录插件/CLI 时自动生成，只给官方客户端用）'
-            + '和「API key」（在 app.cline.bot → Settings → API Keys 里新建，给脚本用）。'
-            + '请到 app.cline.bot 新建一个 API key 填进本阶段的密钥框。'
-            + `\n\n上游原文：${raw}`,
+            'Cline 拒绝了这次请求（401）。这个报错对应三种不同原因，按顺序排查：\n\n'
+            + '① 额度用尽（最常见）—— Cline 撞到额度上限时返回的就是这个 401，'
+            + '而不是 429。先去 app.cline.bot 看用量和额度。\n'
+            + '② 凭据类型不对 —— Cline 有两种 token：「账号 auth token」（登录插件/CLI 时'
+            + '自动生成，只给官方客户端用）和「API key」（在 app.cline.bot → Settings → '
+            + 'API Keys 里新建，给脚本用）。第三方调用必须用 API key。\n'
+            + '③ key 被撤销或失效。\n'
+            + `\n上游原文：${raw}`,
         );
     }
 
@@ -398,6 +406,19 @@ export function humanizeUpstreamError(error) {
             `上游返回 404/405，地址可能没写到端点。本扩展已自动补 /chat/completions，`
             + `如果你填的地址本身带路径（不是以 /v1 结尾），请检查是否需要手工写全。`
             + `\n\n上游原文：${raw}`,
+        );
+    }
+
+    // 上游返回 200 但没有正文：多半是响应被包了一层，酒馆解析不到 choices
+    if (/返回为空|empty response|no content/i.test(raw)) {
+        return new Error(
+            `上游返回了成功状态但正文是空的。\n\n`
+            + '如果这个阶段指向 Cline，几乎可以确定是这个原因：**Cline 的非流式响应会把'
+            + '标准结构再包一层 data**（{"data":{"choices":[…]}}），而酒馆读的是 '
+            + 'choices[0].message.content，于是拿到空字符串。\n\n'
+            + '解决办法：把该阶段的「流式」打开。Cline 的**流式**分片是标准 OpenAI 格式，'
+            + '没有那层包裹，酒馆能正常解析。\n'
+            + `\n上游原文：${raw}`,
         );
     }
 

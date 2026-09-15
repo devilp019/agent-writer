@@ -316,3 +316,78 @@ NUL 字节和 `U+FFFD` 编码损坏四种情况。另外 `Get-Content` / `Set-Co
 - 需要 **酒馆助手（JS-Slash-Runner）**，未安装则 ②③ 不可用
 - ② 的密钥以明文存在扩展设置里（跟随酒馆账号）。不分享设置文件则只影响你自己
 - 中止生成依赖 `stopGenerationById`，部分上游不吃这套
+
+---
+
+## 上游实测笔记：Cline（api.cline.bot）
+
+这几条都是直连探针实测出来的，不是推测。留着免得重复踩。
+
+### 1. 撞额度限制时返回 401，不是 429
+
+同一个 key、同一份请求，前一刻七个用例全部 `HTTP 200`，后一刻全部：
+
+```
+HTTP 401 {"error":"Unauthorized: Please make sure you're using the latest version of Cline and re-authenticate your Cline account."}
+```
+
+原因是用尽了 5 小时额度窗口。**这个 401 对应至少三种原因**，看到它先别急着换 key：
+
+| 可能 | 怎么确认 |
+|---|---|
+| 额度用尽（最常见） | 去 app.cline.bot 看用量 |
+| 用错凭据类型 | 必须用 Settings → API Keys 里生成的 **API key**，不能用登录插件时的账号 auth token |
+| key 被撤销 | 重新生成一个 |
+
+### 2. 非流式响应多包了一层 `data`，酒馆解析不到正文
+
+```jsonc
+// Cline 非流式实际返回：
+{ "data": { "choices": [ { "message": { "content": "OK" } } ] } }
+//                 ↑ 标准结构被包在这里面
+
+// 酒馆读的是：
+choices[0].message.content      // ← 顶层没有 choices，拿到空字符串
+```
+
+表现就是 **HTTP 200、请求成功、但正文是空的**，只看状态码会得到一个假的成功信号。
+
+**修法：把该阶段的「流式」打开。** 实测流式分片是标准 OpenAI 格式，没有那层包裹：
+
+```
+分片总数          83
+被包 data 的分片  0        ← 干净的
+带 content 的分片  20
+带 reasoning 的分片 61
+```
+
+### 3. Cline 无法关思考
+
+`thinking: { type: 'disabled' }` 和 `reasoning_effort: 'none'` **都被静默忽略** —— 不报错，也不关。同一道题跑三遍的 reasoning 分片数：
+
+| 请求 | reasoning 分片 |
+|---|---|
+| 不传任何参数 | 96 |
+| `thinking.type = disabled` | 111 |
+| `reasoning_effort = none` | 112 |
+
+**所以 Cline 只能放在②这类本来就要开思考的阶段。** ③ 必须靠「关思考」才有好文笔，放 Cline 会得到边写边盘算剧情的正文 —— 正是要避免的那种。
+
+### 4. 那个模型名
+
+`cline-pass/deepseek-v4-flash` 可用（Cline 侧实际路由到 `vmc/deepseek-v4-flash-contributor-fallbacks`）。
+`cline-pass/deepseek-v4.1-flash` 这个写法**没验证过**，别想当然。
+
+### 怎么自己复现这些结论
+
+仓库外的 `agent-writer-tools/probe-endpoint.mjs` 是直连探针，绕开酒馆和扩展：
+
+```bash
+cd ../agent-writer-tools
+$env:AW_KEY='你的key'
+node probe-endpoint.mjs --model cline-pass/deepseek-v4-flash          # 逐层加字段二分
+node probe-endpoint.mjs --model cline-pass/deepseek-v4-flash --stream-shape   # 看流式分片结构
+node probe-endpoint.mjs --model cline-pass/deepseek-v4-flash --thinking       # 验关思考有没有效
+```
+
+**「上游的问题」和「酒馆转发的问题」必须先分开**，否则会一直在错误的地方找原因。

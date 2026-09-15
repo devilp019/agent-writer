@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.0';
+import { demoState } from '../state.js?v=0.8.1';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -75,7 +75,8 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         <label class="aw-field">
             <span>附加请求体字段 JSON（顶层字段，provider 私有参数）</span>
             <textarea id="${id('bodyfields')}" rows="3">${esc(JSON.stringify(s.bodyFields ?? {}, null, 2))}</textarea>
-            <em class="aw-tip">思考开关就在这里（没有下拉框，只能手填）。DeepSeek 官方 API 的写法：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。注意 <code>reasoning_effort</code> 只调「想多久」，不负责开关 —— 想关必须用 thinking。通过 CHAT_COMPLETION_SETTINGS_READY 注入，不走 custom_include_body。</em>
+            <em class="aw-tip">思考开关就在这里（没有下拉框，只能手填）。DeepSeek 官方 API 的写法：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。注意 <code>reasoning_effort</code> 只调「想多久」，不负责开关 —— 想关必须用 thinking。通过 CHAT_COMPLETION_SETTINGS_READY 注入，不走 custom_include_body。<br><b>Cline 例外：</b>实测它把 <code>thinking</code> 和 <code>reasoning_effort</code> <b>都静默忽略</b>，没法关思考（不报错，照常思考）。所以 Cline 只适合放在②这类本来就要开思考的阶段。</em>
+            <em class="aw-tip">指向 Cline 时，<b>「流式」必须打开</b>：它的非流式响应会多包一层 <code>data</code>，酒馆解析不到正文，会得到「成功但返回为空」。</em>
         </label>
 
         <div class="aw-grid">
@@ -298,7 +299,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.0';
+export const VERSION = '0.8.1';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
