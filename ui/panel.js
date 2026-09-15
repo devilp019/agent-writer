@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.6.3';
+import { demoState } from '../state.js?v=0.7.0';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -52,13 +52,13 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         <label class="aw-field">
             <span>换渠道：API 地址（留空 = 用当前连接）</span>
             <input type="text" id="${id('apiurl')}" value="${esc(s.apiUrl ?? '')}" placeholder="例如 https://api.cline.bot/api/v1">
-            <em class="aw-tip">指向 OpenAI 兼容端点。填了它就用这个地址发请求，下面两项都不用管。</em>
+            <em class="aw-tip">填 <b>base 地址</b>（到 /v1 为止）就行，/chat/completions 由酒馆自己补。指向 OpenAI 兼容端点。填了它就用这个地址发请求，下面两项都不用管。</em>
         </label>
 
         <label class="aw-field">
             <span>换渠道：API 密钥</span>
             <input type="password" id="${id('apikey')}" value="${esc(s.apiKey ?? '')}" placeholder="sk-...">
-            <em class="aw-tip">明文存在扩展设置里。不分享设置的话只影响你自己。</em>
+            <em class="aw-tip">明文存在扩展设置里。不分享设置的话只影响你自己。注意别把「账号登录 token」当成 API key —— Cline 这类服务两者不通用，拿错了会返回 401。</em>
         </label>
 
         <label class="aw-field">

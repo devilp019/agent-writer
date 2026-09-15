@@ -100,6 +100,14 @@ function stageDefaults(overrides) {
          *   2. proxyPreset     —— 酒馆的「代理预设」
          *   3. 都不填          —— 用当前连接
          *
+         * apiUrl 填的是 **base 地址**（例如 https://api.cline.bot/api/v1），
+         * `/chat/completions` 由酒馆自己补 —— 这是酒馆 custom 源的契约，
+         * 我们补了会变成双重拼接。已经写全端点的写法酒馆也认（以
+         * /chat/completions 结尾就原样用）。
+         *
+         * apiKey 必须是真正的 API key，不能拿「账号登录 token」顶替：
+         * Cline 这类服务两种凭据不通用，拿错会得到 401。
+         *
          * 注意 proxyPreset 的局限：酒馆的代理预设是**挂在具体厂商下面的**
          * （DeepSeek / Gemini 等），不是给 OpenAI 兼容自定义源用的。
          * 要指向 Cline 这类自定义端点，用 apiUrl + apiKey。

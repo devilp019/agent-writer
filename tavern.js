@@ -275,6 +275,74 @@ export function clearPendingPayload(tag) {
 // ---------------------------------------------------------------------------
 
 /**
+ * 归一化自定义端点地址。
+ *
+ * ⚠️ 酒馆的 `custom_url` 要的是**base url**，`/chat/completions` 由酒馆自己补。
+ * TauriTavern（酒馆原生 API 格式的适配层）的文档把这条契约写得很明白：
+ * 「端点预览只展示当前所选格式的最终 endpoint（base URL + suffix）」，
+ * 而 suffix 映射就是 OpenAI-compatible→`/chat/completions`。
+ *
+ * 所以这里**只去掉末尾多余的斜杠，绝不补路径**。
+ * 上一版我照抄了 st-end-component-generator 的 normalizeChatCompletionsUrl()，
+ * 那是错的 —— 那个仓库是浏览器直连 fetch、自己拼 URL，当然要自己补；
+ * 本扩展走的是酒馆的请求管线，补了就会变成
+ * /api/v1/chat/completions/chat/completions。
+ *
+ * 两种写法都仍然接受（用户怎么填都不会炸）：已经是完整端点的写法，
+ * 酒馆会以 `/chat/completions` 结尾作为判据、原样使用不再追加。
+ */
+export function normalizeChatCompletionsUrl(rawUrl) {
+    const url = String(rawUrl ?? '').trim();
+    if (!url) return '';
+    // 只收拾末尾斜杠：多余斜杠会让酒馆拼出 //chat/completions
+    return url.replace(/\/+$/, '');
+}
+
+/**
+ * 把上游的报错翻译成人能直接照做的提示。
+ *
+ * 起因：接 Cline 时拿到 401「Please make sure you're using the latest version
+ * of Cline and re-authenticate」。这句话把人引向「去重装 Cline」，
+ * 但真实原因是**拿错了 token 类型** —— Cline 有两种凭据：
+ *
+ *   - API key：在 app.cline.bot 的 Settings > API Keys 里生成，
+ *     给脚本/CI 用，可以填进本扩展。密钥形如 cline_xxx
+ *   - 账号 auth token：登录 Cline 插件/CLI 时自动生成，
+ *     明文挂在 ~/.cline 的配置里，**只给官方客户端用**，
+ *     第三方客户端拿它调 api.cline.bot 就会被这个 401 挡掉
+ *
+ * 所以这里要看的是「报错方认识不认识这个客户端」，而不是「key 对不对」。
+ */
+export function humanizeUpstreamError(error) {
+    const raw = String(error?.message ?? error ?? '').trim();
+    if (!raw) return error;
+
+    const isCline = /cline\.bot|latest version of Cline|re-authenticate your Cline/i.test(raw);
+    const is401 = /\b401\b|unauthori[sz]ed/i.test(raw);
+
+    if (isCline && is401) {
+        return new Error(
+            'Cline 拒绝了这次请求（401）。这通常不是密钥写错，而是用错了凭据类型：'
+            + 'Cline 有两种 token —— 「账号 auth token」（登录插件/CLI 时自动生成，只给官方客户端用）'
+            + '和「API key」（在 app.cline.bot → Settings → API Keys 里新建，给脚本用）。'
+            + '请到 app.cline.bot 新建一个 API key 填进本阶段的密钥框。'
+            + `\n\n上游原文：${raw}`,
+        );
+    }
+
+    // 地址补错方向：base url 少拼了路径时是 404/405，不是 401
+    if (/\b(?:404|405)\b/.test(raw) && /not found|method not allowed/i.test(raw)) {
+        return new Error(
+            `上游返回 404/405，地址可能没写到端点。本扩展已自动补 /chat/completions，`
+            + `如果你填的地址本身带路径（不是以 /v1 结尾），请检查是否需要手工写全。`
+            + `\n\n上游原文：${raw}`,
+        );
+    }
+
+    return error;
+}
+
+/**
  * 跑一次生成。指令由调用方写入槽位，这里只负责调 generate。
  *
  * @param {object} options
@@ -296,7 +364,7 @@ export async function tavernGenerate({ stage, generationId, signal, onProgress }
     // （DeepSeek / Gemini 等），只覆盖该厂商的 base url，没法用来指向
     // Cline 这类 OpenAI 兼容的自定义端点。apiUrl + apiKey 才是通用的。
     if (stage.apiUrl) {
-        customApi.apiurl = String(stage.apiUrl).trim();
+        customApi.apiurl = normalizeChatCompletionsUrl(stage.apiUrl);
         // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
         customApi.source = 'custom';
         if (stage.apiKey) customApi.key = String(stage.apiKey).trim();
@@ -349,6 +417,9 @@ export async function tavernGenerate({ stage, generationId, signal, onProgress }
     try {
         const result = await api.generate(config);
         return typeof result === 'string' ? result : String(result?.content ?? '');
+    } catch (e) {
+        // 把「重装 Cline」这类把人引偏的报错换成可照做的提示
+        throw humanizeUpstreamError(e);
     } finally {
         signal?.removeEventListener('abort', onAbort);
         try {
