@@ -149,89 +149,43 @@ function setDiagProfileId(context, id) {
     context.saveSettingsDebounced?.();
 }
 
-/**
- * 失败时的补充诊断：绕过所有包装，直接把上游响应原样打出来。
- *
- * 为什么需要：ConnectionManagerRequestService / ChatCompletionService 会把
- * 上游错误包装成一句没用的 "Internal Server Error"，真正的原因（哪个字段不对、
- * 哪个模型不存在、密钥有没有生效）全在里面被吃掉了。
- */
-async function rawFailureProbe(profileId, extractData = true) {
-    const context = ctx();
-    const svc = context?.ConnectionManagerRequestService;
-    if (!svc) return null;
+/** 发一次请求，流式或非流式。返回统一的 { ok, content, reasoning, note } */
+async function runOnce(svc, profileId, useStream) {
+    const messages = [{ role: 'user', content: 'Say OK' }];
+    const options = { stream: useStream, extractData: true, includePreset: false, includeInstruct: false };
 
-    const out = [];
-    let profile;
-    try {
-        profile = svc.getProfile(profileId);
-    } catch (e) {
-        out.push(`  取 profile 失败: ${e?.message}`);
-        return out.join('\n');
+    if (!useStream) {
+        const result = await svc.sendRequest(profileId, messages, 1024, options);
+        const content = String(result?.content ?? '');
+        return {
+            ok: !!content,
+            content,
+            reasoning: String(result?.reasoning ?? ''),
+            note: content ? '' : 'HTTP 成功但解析不出正文（包裹格式可能不被酒馆识别）',
+        };
     }
 
-    const apiMap = context.CONNECT_API_MAP?.[profile.api] ?? {};
-    const messages = [{ role: 'user', content: 'ping' }];
-
-    // 优先用 ST 自己的构造器，保证发出去的 body 和正常路径一致；
-    // 拿不到就手工拼一个等价的。
-    let build;
-    try {
-        const creator = context.ChatCompletionService?.createRequestData;
-        build = (extra) => (typeof creator === 'function'
-            ? creator({ ...extra, messages })
-            : { stream: false, messages, use_sysprompt: true, ...extra });
-    } catch {
-        build = (extra) => ({ stream: false, messages, use_sysprompt: true, ...extra });
+    const streamFn = await svc.sendRequest(profileId, messages, 1024, options);
+    if (typeof streamFn !== 'function') {
+        return { ok: false, content: '', reasoning: '', note: '这个配置不支持流式' };
     }
-
-    const base = {
-        model: profile.model,
-        chat_completion_source: apiMap.source,
-        max_tokens: 8,
-        secret_id: profile['secret-id'],
-        custom_url: profile['api-url'],
-    };
-
-    const attempts = [
-        ['完整字段', build(base)],
-        ['去掉 secret_id', build({ ...base, secret_id: undefined })],
-        ['去掉 custom_url', build({ ...base, custom_url: undefined })],
-        ['最小 body', { messages, chat_completion_source: apiMap.source, model: profile.model, max_tokens: 8 }],
-    ];
-
-    for (const [label, body] of attempts) {
-        // 去掉 undefined，避免服务端把它当成有值
-        for (const k of Object.keys(body)) {
-            if (body[k] === undefined) delete body[k];
-        }
-        try {
-            const resp = await fetch('/api/backends/chat-completions/generate', {
-                method: 'POST',
-                headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const text = await resp.text();
-
-            if (resp.ok) {
-                out.push(`  【${label}】✔ HTTP ${resp.status} —— 这条能通！`);
-                out.push(`    响应: ${text.slice(0, 300)}`);
-                break;
-            }
-
-            out.push(`  【${label}】✘ HTTP ${resp.status}`);
-            out.push(`    响应: ${text.slice(0, 600)}`);
-        } catch (e) {
-            out.push(`  【${label}】抛错: ${e?.message}`);
-        }
+    let full = '';
+    let reasoning = '';
+    for await (const { text, state } of streamFn()) {
+        full = text ?? full;
+        reasoning = state?.reasoning ?? reasoning;
     }
-
-    return out.join('\n');
+    return { ok: !!full, content: full, reasoning, note: full ? '' : '流式也没拿到正文' };
 }
 
 /**
- * 用指定（或当前）连接配置发一个 1 token 的真实请求，验证整条链路。
+ * 用指定（或当前）连接配置发一个真实请求，验证整条链路。
  * 这会消耗极少量额度 —— 是显式点击触发的，不是自动跑的。
+ *
+ * 关键：先试非流式，正文为空就自动改走流式。
+ * 有些上游（例如 Cline）的非流式包裹格式酒馆解析不了，
+ * 只看 HTTP 状态会得到一个假的成功信号。
+ *
  * @param {string} [profileId]
  */
 export async function probe(profileId) {
@@ -270,60 +224,77 @@ export async function probe(profileId) {
         out.push(`  api=${profile.api}  →  selected=${apiMap.selected ?? '?'}  source=${apiMap.source ?? '?'}`);
         out.push(`  model=${profile.model || '(空)'}  api-url=${profile['api-url'] || '(空)'}  secret=${profile['secret-id'] ? '已设' : '(无)'}  preset=${profile.preset || '(空)'}`);
     }
-    out.push('发送中（max_tokens=8）…');
 
     setDiagOutput(out.join('\n'));
     log(`开始探测连接配置「${profile?.name ?? id}」`);
 
-    const started = Date.now();
     try {
-        const result = await svc.sendRequest(
-            id,
-            [{ role: 'user', content: 'ping' }],
-            8,
-            { stream: false, extractData: true, includePreset: false, includeInstruct: false },
-        );
-
-        const elapsed = Date.now() - started;
+        // —— 第一轮：非流式 ——
         out.push('');
-        out.push(`✔ 请求成功，耗时 ${elapsed}ms`);
-        out.push(`  content: ${JSON.stringify(String(result?.content ?? '').slice(0, 120))}`);
-        out.push(`  reasoning: ${result?.reasoning ? `${result.reasoning.length} 字` : '(空)'}`);
-        out.push('');
-        out.push('=== 思维链能力 ===');
-        out.push(
-            result?.reasoning
-                ? '✔ 返回了 reasoning —— 非流式模式下可以直接读，不需要拦截 fetch。'
-                : '△ 未返回 reasoning —— 可能是该模型不支持、或该源未透出。功能不受影响，只是思维链可能看不到。',
-        );
-
-        setDiagProfileId(context, id);
-        log(`探测成功：${elapsed}ms，reasoning ${result?.reasoning?.length ?? 0} 字`);
-    } catch (error) {
-        const elapsed = Date.now() - started;
-        out.push('');
-        out.push(`✘ 请求失败，耗时 ${elapsed}ms`);
-        out.push(`  ${error?.message ?? error}`);
-        const cause = error?.cause;
-        if (cause) out.push(`  cause: ${cause?.message ?? cause}`);
-
-        out.push('');
-        out.push('=== 裸请求诊断（绕过包装，看真实错误）===');
+        out.push('【非流式】发送中…');
         setDiagOutput(out.join('\n'));
-        try {
-            const raw = await rawFailureProbe(id);
-            out.push(raw ?? '  (无法执行裸请求诊断)');
-        } catch (e) {
-            out.push(`  裸请求诊断本身出错: ${e?.message}`);
+
+        const started = Date.now();
+        const plain = await runOnce(svc, id, false);
+        out.push(`  耗时 ${Date.now() - started}ms`);
+        if (plain.ok) {
+            out.push(`  ✔ 正文: ${JSON.stringify(plain.content.slice(0, 100))}`);
+            out.push(`  思维链: ${plain.reasoning ? `${plain.reasoning.length} 字` : '(空)'}`);
+        } else {
+            out.push(`  △ HTTP 通了，但没拿到正文${plain.note ? ` —— ${plain.note}` : ''}`);
+        }
+
+        // —— 第二轮：需要时才试流式 ——
+        let final = { ok: plain.ok, mode: '非流式', content: plain.content, reasoning: plain.reasoning };
+
+        if (!plain.ok) {
+            out.push('');
+            out.push('【流式】自动重试中…');
+            setDiagOutput(out.join('\n'));
+
+            const started2 = Date.now();
+            const streamed = await runOnce(svc, id, true);
+            out.push(`  耗时 ${Date.now() - started2}ms`);
+            if (streamed.ok) {
+                out.push(`  ✔ 正文: ${JSON.stringify(streamed.content.slice(0, 100))}`);
+                out.push(`  思维链: ${streamed.reasoning ? `${streamed.reasoning.length} 字` : '(空)'}`);
+                final = { ok: true, mode: '流式', content: streamed.content, reasoning: streamed.reasoning };
+            } else {
+                out.push(`  ✘ ${streamed.note || '流式也没拿到正文'}`);
+            }
         }
 
         out.push('');
-        out.push('说明：上面每条是同一个请求的不同字段组合，看哪条能通就知道是哪个字段的问题。');
-        log(`探测失败：${error?.message ?? error}`);
+        out.push('=== 结论 ===');
+        if (final.ok) {
+            out.push(`✔ 这条配置可用，走${final.mode}。`);
+            if (final.mode === '流式') {
+                out.push('');
+                out.push('⚠ 非流式的包裹格式酒馆解析不了，这条配置必须开流式。');
+                out.push('  扩展会自动对这类配置启用流式，你不用手动管。');
+            }
+            out.push('');
+            out.push('=== 思维链能力 ===');
+            out.push(
+                final.reasoning
+                    ? '✔ 返回了 reasoning —— 非流式/流式都能直接读，不需要拦截 fetch。'
+                    : '△ 未拿到 reasoning —— 可能是模型不支持、或该源未透出。功能不受影响，只是思维链看不到。',
+            );
+            setDiagProfileId(context, id);
+        } else {
+            out.push('✘ 非流式和流式都没拿到正文。');
+            out.push('  下一步需要看酒馆后台日志里上游返回的原始响应。');
+        }
+    } catch (error) {
+        out.push('');
+        out.push(`✘ 请求失败: ${error?.message ?? error}`);
+        const cause = error?.cause;
+        if (cause) out.push(`  cause: ${cause?.message ?? cause}`);
     }
 
     const text = out.join('\n');
     setDiagOutput(text);
+    log('探测完成');
     return text;
 }
 
@@ -608,16 +579,56 @@ export async function probeShape(model) {
     });
 
     // 5. 走酒馆自己的服务代码（它内部会按 source 分派）
-    await attempt('⑤ 走 ConnectionManagerRequestService', {
+    await attempt('⑤ 走 ConnectionManagerRequestService（非流式）', {
         messages,
         max_tokens: 1024,
     }, { viaService: true });
 
+    // 6. 流式：有些上游的非流式包裹格式酒馆解析不了，只能走流式
+    say('=== 流式对照 ===');
+    say('（非流式返回空内容时，这一节通常才是真相）');
+    say('');
+    try {
+        const streamFn = await svc.sendRequest(
+            profileId,
+            messages,
+            1024,
+            { stream: true, extractData: true, includePreset: false, includeInstruct: false },
+        );
+
+        if (typeof streamFn !== 'function') {
+            say('✘ 没有拿到流式迭代器（这个配置可能不支持流式）');
+        } else {
+            let full = '';
+            let reasoning = '';
+            let chunks = 0;
+            const started = Date.now();
+            for await (const { text, state } of streamFn()) {
+                full = text ?? full;
+                reasoning = state?.reasoning ?? reasoning;
+                chunks++;
+            }
+            const elapsed = Date.now() - started;
+            say(`   分片数 ${chunks}   耗时 ${elapsed}ms`);
+            say(`   正文   ${full ? JSON.stringify(full.slice(0, 120)) : '(空)'}`);
+            say(`   思维链 ${reasoning ? `${reasoning.length} 字` : '(空)'}`);
+            say('');
+            if (full) {
+                say('   ✔ 流式能拿到正文 ⇒ 这个配置必须走流式，非流式的包裹格式酒馆解析不了');
+            } else {
+                say('   ✘ 流式也没拿到正文 ⇒ 需要看酒馆后台的原始响应');
+            }
+        }
+    } catch (e) {
+        const cause = e?.cause?.message ?? e?.cause;
+        say(`   ✘ 流式抛错: ${e?.message}${cause ? ` / cause: ${cause}` : ''}`);
+    }
+
+    say('');
     say('判断方法：');
-    say('  · ① 能通而 ② 不通 ⇒ 问题在 chat_completion_source / custom_url');
-    say('  · ③ 不通而 ④ 通 ⇒ max_tokens 太小被上游拒绝');
-    say('  · ⑤ 能通 ⇒ 用服务路径就行，我的极简构造有问题');
-    say('  · 全都不通 ⇒ 需要拿酒馆真正发出的那份 body 来对比（下一步）');
+    say('  · 非流式返回空、流式有正文 ⇒ 该配置只能走流式');
+    say('  · ① 不通而 ② 通 ⇒ 缺 custom_url 时酒馆无法路由');
+    say('  · ⑤ 能通 ⇒ 用服务路径就行');
     log('请求体形状对照完成');
     return out.join('\n');
 }
