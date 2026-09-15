@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.9';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.9';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.10';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.10';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.9');
+        const mod = await import('./pipeline.js?v=0.8.10');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.9 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.10 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.9');
+        const mod = await import('./tavern.js?v=0.8.10');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.9 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.10 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1038,7 +1038,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.9'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.10'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1066,7 +1066,13 @@ export async function probeExact(settings) {
     say(`附加字段     ${Object.keys(bodyFields).length ? JSON.stringify(bodyFields) : '{}（空）'}`);
     say('');
 
-    // 严格照抄 buildCustomApi 的产出 + 附加字段，只替掉 messages
+    // 严格照抄 buildCustomApi 的产出 + 附加字段，只替掉 messages。
+    //
+    // 但 `apiurl` 要拿掉：它是 TavernHelper 的**配置字段**，不是酒馆后端的
+    // 入参。留着它，酒馆后端可能会把不认识的顶层字段一起转给上游，
+    // 而第三方端点遇到多余字段的反应不可预期。真实链路里
+    // custom_api.apiurl 是被 applyCustomApiOverrides 消费掉的，不会进 generate_data，
+    // 所以这里也必须一致 —— 否则这个诊断本身就不是「照抄实跑」。
     const body = {
         ...customApi,
         messages: [{ role: 'user', content: 'Say OK' }],
@@ -1076,6 +1082,7 @@ export async function probeExact(settings) {
         use_sysprompt: false,
         ...bodyFields,
     };
+    delete body.apiurl;
     // key 已经在 custom_include_headers 里了，这里绝不能带 —— 带了就退回旧做法
     delete body.key;
 
@@ -1084,9 +1091,16 @@ export async function probeExact(settings) {
     say('');
 
     const exactReport = await sendAndReport(context, body, say, out);
+    const exactVerdict = verdictOf(exactReport);
+
+    // 自证：把判断依据打出来。
+    // 这里出过一次「输出自相矛盾」——同一段输出里既有 ✘ 又走了「通过」分支，
+    // 而我只能靠比对文案去猜用户装的是哪一版。打出来就不必猜。
+    say(`（判断依据：${exactVerdict}；响应文本长度 ${String(exactReport ?? '').length}）`);
+    say('');
 
     // 只有真的复现了失败才继续二分 —— 没失败说明触发条件还没找到。
-    if (verdictOf(exactReport) !== 'fail') {
+    if (exactVerdict !== 'fail') {
         say('=== 判断 ===');
         say('  · 用真实参数这里是通的 ⇒ 差别在「走不走酒馆助手的 generate()」，');
         say('    下一步看「查看实际请求体」里实发的那份 generate_data。');
