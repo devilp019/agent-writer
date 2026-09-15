@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.8.17';
+const VERSION = '0.8.18';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.8.17';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.17';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.17';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.8.18';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.18';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.18';
 import {
     mountPanel,
     unmountPanel,
@@ -27,12 +27,12 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.8.17';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.17';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.17';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.17';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.17';
-import * as notice from './notice.js?v=0.8.17';
+} from './ui/panel.js?v=0.8.18';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.18';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.18';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.18';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.18';
+import * as notice from './notice.js?v=0.8.18';
 
 const MODULE_NAME = 'agent_writer';
 

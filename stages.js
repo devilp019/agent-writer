@@ -10,7 +10,7 @@
  * 自己扫世界书、自己对齐缓存前缀」的代码，现在全都不需要了。
  */
 
-import { CRITIQUE_SCHEMA } from './config.js?v=0.8.17';
+import { CRITIQUE_SCHEMA } from './config.js?v=0.8.18';
 
 /** 把校验 schema 渲染成提示词里的文字说明 */
 export function describeSchema() {

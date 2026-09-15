@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.17';
+import { demoState } from '../state.js?v=0.8.18';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -73,9 +73,9 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         </label>
 
         <label class="aw-field">
-            <span>附加请求体字段 JSON（顶层字段，provider 私有参数）</span>
-            <textarea id="${id('bodyfields')}" rows="3">${esc(JSON.stringify(s.bodyFields ?? {}, null, 2))}</textarea>
-            <em class="aw-tip">思考开关就在这里（没有下拉框，只能手填）。DeepSeek 官方 API 的写法：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。注意 <code>reasoning_effort</code> 只调「想多久」，不负责开关 —— 想关必须用 thinking。通过 CHAT_COMPLETION_SETTINGS_READY 注入，不走 custom_include_body。<br><b>Cline 例外：</b>实测它把 <code>thinking</code> 和 <code>reasoning_effort</code> <b>都静默忽略</b>，没法关思考（不报错，照常思考）。所以 Cline 只适合放在②这类本来就要开思考的阶段。</em>
+            <span>附加请求体字段（原文发送，可以写不严格的 JSON）</span>
+            <textarea id="${id('bodyfields')}" rows="4">${esc(bodyFieldsText(s))}</textarea>
+            <em class="aw-tip">这里的内容会**原样**发给上游（走 custom_include_body，酒馆不解析它）。所以你可以写不严格的 JSON —— 例如故意留个尾逗号，反而能让酒馆不去过滤它不认识的字段（providerOptions 这类）。<br>DeepSeek 官方 API 的思考开关：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。<b>Cline 例外：</b>实测它把 <code>thinking</code> 和 <code>reasoning_effort</code> 都静默忽略，关不掉。</em>
             <em class="aw-tip">指向 Cline 时，<b>「流式」必须打开</b>：它的非流式响应会多包一层 <code>data</code>，酒馆解析不到正文，会得到「成功但返回为空」。</em>
         </label>
 
@@ -96,6 +96,21 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
             <em class="aw-tip">部分上游（如 Cline）非流式解析不了，建议保持开启</em>
         </label>
     `;
+}
+
+/**
+ * 文本框里该显示什么。
+ *
+ * 优先用**原文**（bodyFieldsRaw），而不是解析后的对象 ——
+ * 用户写不严格 JSON 时解析会失败、bodyFields 变成 {}，
+ * 如果拿它去渲染，用户写的内容会在面板重绘时被抹掉。
+ * 表现就是「填了但没存住」。（这正是一个实测报上来的 bug。）
+ */
+function bodyFieldsText(s) {
+    const raw = s.bodyFieldsRaw;
+    if (typeof raw === 'string' && raw.trim()) return raw;
+    const obj = s.bodyFields ?? {};
+    return Object.keys(obj).length ? JSON.stringify(obj, null, 2) : '{}';
 }
 
 /** 从控件读回一个阶段的配置 */
@@ -311,7 +326,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.17';
+export const VERSION = '0.8.18';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();

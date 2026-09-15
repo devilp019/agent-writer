@@ -501,27 +501,6 @@ export function humanizeUpstreamError(error) {
 }
 
 /**
- * 把请求头对象序列化成酒馆要的字符串形式。
- *
- * 为什么必须是字符串：实测同一个 key、同一个 body，
- *   custom_include_headers 传对象   → HTTP 400
- *   custom_include_headers 传字符串 → HTTP 200
- * 酒馆后端不会替我们把对象变成请求头。
- *
- * 格式照抄织幕：`"键": "值"` 每行一条（合法 YAML 映射）。
- * 不用 JSON.stringify —— 那样整段是一个 JSON 串，不是酒馆要的映射。
- *
- * @param {Record<string, string>} headers
- * @returns {string}
- */
-export function serializeHeaders(headers) {
-    return Object.entries(headers)
-        .filter(([name, value]) => String(name ?? '').trim() && value !== undefined && value !== null)
-        .map(([name, value]) => `${JSON.stringify(String(name))}: ${JSON.stringify(String(value))}`)
-        .join('\n');
-}
-
-/**
  * 把一个阶段的设置编译成 TavernHelper 的 `custom_api`。
  *
  * 抽成独立函数是为了让它成为**单一真相源**：tavernGenerate 用它发请求，
@@ -571,16 +550,18 @@ export function buildCustomApi(stage = {}) {
         // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
         customApi.source = 'custom';
         if (apiKey) {
-            // 值必须带 `Bearer ` 前缀 —— 实测：Authorization 直接放裸 key，
+            // 值必须带 `Bearer ` 前缀 —— 实测 Authorization 直接放裸 key，
             // Cline 回的正是那句误导性的 401。
             //
-            // 而且**必须序列化成字符串**，不能传对象。实测（同一个 key、同一个 body）：
-            //   custom_include_headers 传对象 {"Authorization":"Bearer sk_..."} → 400
-            //   custom_include_headers 传字符串 '"Authorization": "Bearer sk_..."' → 200
-            // 也就是说酒馆后端不会替我们把对象变成请求头。
-            //
-            // 形态上照抄织幕的做法（它把请求头 YAML 序列化之后放进这个字段）。
-            customApi.custom_include_headers = serializeHeaders({ Authorization: `Bearer ${apiKey}` });
+            // 而且**必须传对象，不能自己序列化成字符串**：
+            // TavernHelper 的 applyCustomApiOverrides 会对这个字段做
+            // `YAML.stringify`。传对象 → 得到正确的映射：
+            //     Authorization: Bearer sk_...
+            // 传字符串 → 字符串在 YAML 里是个标量，会被再加一层引号：
+            //     '"Authorization": "Bearer sk_..."'
+            // 那不是映射，酒馆解析不出请求头，于是 401。
+            // 这个坑实测踩过两次，方向正好相反，所以这段注释写详细些。
+            customApi.custom_include_headers = { Authorization: `Bearer ${apiKey}` };
         }
 
         // 附加请求体字段走 custom_include_body，**用面板里的原文**。
