@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.2';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.2';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.3';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.3';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.2');
+        const mod = await import('./pipeline.js?v=0.8.3');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -788,6 +788,24 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
                 body: JSON.stringify(body),
             });
             const text = await resp.text();
+
+            // 开了流式时返回的是 SSE，不是 JSON —— 别拿 JSON.parse 去判成败，
+            // 否则「成功但正文在 SSE 里」会被误报成失败（这里踩过一次）。
+            if (body.stream && resp.ok && /^\s*data:/m.test(text)) {
+                const lines = text.split('\n').filter((l) => l.startsWith('data:'));
+                const done = lines.some((l) => l.includes('[DONE]'));
+                let chars = 0;
+                for (const line of lines) {
+                    if (line.includes('[DONE]')) continue;
+                    let j = null;
+                    try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                    const innerD = j?.data ?? j;
+                    chars += String(innerD?.choices?.[0]?.delta?.content ?? '').length;
+                }
+                say(`   ✔ HTTP ${resp.status}  流式通：分片 ${lines.length} 个，正文 ${chars} 字${done ? '，收到 [DONE]' : ''}`);
+                return true;
+            }
+
             let parsed = null;
             try { parsed = JSON.parse(text); } catch { /* 非 JSON */ }
 
@@ -812,6 +830,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
             if (parsed?.data && !parsed?.choices) {
                 say('     （响应被包了一层 data —— 这是 Cline 非流式的特征，换流式就正常）');
             }
+            if (!parsed) say(`     （响应不是 JSON，前 120 字：${text.slice(0, 120)}）`);
             return false;
         } catch (e) {
             say(`   抛错: ${e?.message}`);
@@ -832,12 +851,12 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     };
 
     const okA = await attempt(
-        '形状 A —— 扩展现在用的：custom_api.key（落成 reverse_proxy + proxy_password）',
+        '形状 A —— 旧做法：custom_api.key（TavernHelper 会拼一份 Authorization）',
         { ...base, key: plainKey },
     );
 
     const okB = await attempt(
-        '形状 B —— 织幕用的：顶层 custom_include_headers 直接指定 Authorization',
+        '形状 B —— 现在用的：顶层 custom_include_headers 直接指定 Authorization',
         { ...base, custom_include_headers: `"Authorization": "Bearer ${plainKey}"` },
     );
 
@@ -865,8 +884,9 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
         say('✔ 两种形状都通 ⇒ 面板这套配置本身没问题，问题在扩展实际发出去的那次请求。');
         say('  下一步：跑一次 ②，然后点「查看实际请求体」对照。');
     } else if (!okA && okB) {
-        say('✘ 形状 A 不通、形状 B 通 ⇒ **custom_api.key 这条路解析有问题**。');
-        say('  修法：扩展改用形状 B（顶层 custom_include_headers）来送密钥。');
+        say('✘ 形状 A 不通、形状 B 通 ⇒ **custom_api.key 这条路送出去的凭据不对**。');
+        say('  修法：扩展改用形状 B（顶层 custom_include_headers）送密钥 —— 0.8.3 起已经是这么做的。');
+        say('  如果这里仍然 A 不通 B 通，说明你装的还是旧版。');
     } else if (okA && !okB) {
         say('△ 形状 A 通、形状 B 不通 —— 少见，把结果发我。');
     } else {

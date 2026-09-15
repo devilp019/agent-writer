@@ -445,12 +445,44 @@ export async function tavernGenerate({ stage, generationId, signal, onProgress }
     //
     // 为什么不用 proxy_preset 打头：酒馆的代理预设是挂在具体厂商下面的
     // （DeepSeek / Gemini 等），只覆盖该厂商的 base url，没法用来指向
-    // Cline 这类 OpenAI 兼容的自定义端点。apiUrl + apiKey 才是通用的。
+    // Cline 这类 OpenAI 兼容的自定义端点。apiUrl 才是通用的。
+    //
+    // ---------------------------------------------------------------------
+    // 密钥走 custom_include_headers，不走 key —— 这是实测出来的，很重要。
+    //
+    // 看 TavernHelper 的 applyCustomApiOverrides（responseGenerator.ts:190）：
+    //
+    //   if (customApi.apiurl) {
+    //     generateData.reverse_proxy  = ...
+    //     generateData.proxy_password = customApi.key || '';     // 对 custom 源无效
+    //     if (chat_completion_source === 'custom') {
+    //       generateData.custom_url = ...
+    //       if (customApi.key) {
+    //         generateData.custom_include_headers =
+    //           overrideCustomAuthorizationHeader(..., customApi.key);  // ← 问题在这
+    //       }
+    //     }
+    //   }
+    //
+    // 也就是说传 key 时，它会替我们拼一份 Authorization 头；但实测这份头
+    // 送到 Cline 会被判 401（同样的 key 直连和「自己给 custom_include_headers」
+    // 都是 200）。见 README「上游实测笔记」一节里形状 A/B 的对照。
+    //
+    // 所以这里显式给 custom_include_headers，让酒馆原样合并，不经过那层覆盖。
+    // 注意一旦给了它，后面 `if (customApi.custom_include_headers)` 分支会
+    // 整体替换，优先级高于 key 拼出来的那份 —— 但不能同时给 key，
+    // 否则 proxy_password 也会被设上，行为变得不可预期。
+    // ---------------------------------------------------------------------
+    const apiKey = String(stage.apiKey ?? '').trim();
     if (stage.apiUrl) {
         customApi.apiurl = normalizeChatCompletionsUrl(stage.apiUrl);
         // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
         customApi.source = 'custom';
-        if (stage.apiKey) customApi.key = String(stage.apiKey).trim();
+        if (apiKey) {
+            // 值只放裸 key —— TavernHelper 会自己拼成 `Bearer ${key}`，
+            // 这里再加一次前缀会变成 "Bearer Bearer sk_..."。
+            customApi.custom_include_headers = { Authorization: apiKey };
+        }
     } else if (stage.proxyPreset) {
         customApi.proxy_preset = String(stage.proxyPreset).trim();
         customApi.source = 'custom';
