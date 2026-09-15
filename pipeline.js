@@ -24,7 +24,7 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
-} from './stages.js?v=0.8.25';
+} from './stages.js?v=0.8.26';
 import {
     injectSlot,
     restoreSlot,
@@ -34,7 +34,8 @@ import {
     makePayloadTag,
     takeLastBody,
     recoverSlots,
-} from './tavern.js?v=0.8.25';
+} from './tavern.js?v=0.8.26';
+import { subscribeStream } from './stream-hook.js?v=0.8.26';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -100,84 +101,16 @@ export function extractReasoning(message) {
 // 这里在整个流水线期间挂一次监听，跑完清掉。
 // ---------------------------------------------------------------------------
 
-const reasonings = new Map();
-let reasoningHook = null;
-
-/**
- * 思维链监听。
- *
- * ⚠️ 结论（已核实，别再花时间查了）：**这条路上拿不到思维链，永远拿不到。**
- *
- *   · 思维链在酒馆内部是攒下来了 —— openai.js:3290 对 custom 源做
- *     `state.reasoning += delta.reasoning_content ?? delta.reasoning`，
- *     并且这个 state 会跟着流式分片一起 yield 出来。
- *   · 但酒馆助手把它们收下之后只读 `state.signature` 和 `state.toolSignatures`
- *     （responseGenerator.ts:142-149），`state.reasoning` 直接丢掉了，
- *     也没有任何事件把它带出来。
- *   · 唯一会 emit STREAM_REASONING_DONE 的地方是酒馆的
- *     public/scripts/reasoning.js:549（ReasoningHandler 类），
- *     而全仓库没有任何文件 import 这个类 —— 这个事件等于死的。
- *     （跟 STREAM_TOKEN_RECEIVED 一样：只在 events.js 里定义过，从没发过。）
- *
- * 所以这里挂的监听是**防御性**的：万一以后酒馆或酒馆助手开始发它，就能自动
- * 接上；现在它一枪不放。界面上对应的「思维链」框会一直是空的，那是正常的，
- * 不代表流水线有问题。
- */
-function hookReasoning() {
-    if (hookReasoning.unavailable) return;
-    const context = ctx();
-    const eventSource = context?.eventSource;
-    const eventTypes = context?.eventTypes;
-    if (!eventSource?.on || !eventTypes?.STREAM_REASONING_DONE) return;
-
-    try {
-        reasoningHook = eventSource.on(eventTypes.STREAM_REASONING_DONE, (reasoning, _duration, messageId) => {
-            if (typeof reasoning === 'string' && reasoning.trim()) {
-                reasonings.set(String(messageId ?? 'last'), reasoning);
-            }
-        });
-    } catch (e) {
-        console.warn('[AgentWriter] 挂思维链监听失败', e);
-        hookReasoning.unavailable = true;
-    }
-}
-
-function unhookReasoning() {
-    try {
-        reasoningHook?.stop?.();
-    } catch { /* 忽略 */ }
-    reasoningHook = null;
-    reasonings.clear();
-}
-
-function takeReasoning() {
-    if (reasonings.size === 0) return '';
-    // 取最长的一条 —— 通常就是本次生成的
-    let best = '';
-    for (const value of reasonings.values()) {
-        if (value.length > best.length) best = value;
-    }
-    reasonings.clear();
-    return best;
-}
-
-/**
- * 读思维链但**不清空** —— 给流式过程中的预览用。
- *
- * 为什么需要两个：STREAM_REASONING_DONE 在流式中途就会带着到目前为止的
- * 思维链触发，那时把它显示出来，用户就能看到「它在思考」。
- * 用 takeReasoning 会把内容取走，导致最后一次拿不到。
- */
-function peekReasoning() {
-    let best = '';
-    for (const value of reasonings.values()) {
-        if (value.length > best.length) best = value;
-    }
-    return best;
-}
-
 // ---------------------------------------------------------------------------
 // 单阶段
+//
+// 实时正文和思维链都从 stream-hook 来（它拦的是酒馆打给
+// /api/backends/chat-completions/generate 的那次 fetch）。
+//
+// 曾经这里有一套 hookReasoning / takeReasoning / peekReasoning，
+// 听的是酒馆的 STREAM_REASONING_DONE。那条路是死的：
+// 唯一会发它的是 reasoning.js 的 ReasoningHandler，而没有任何地方用它。
+// 细节见 stream-hook.js 顶部的说明。
 // ---------------------------------------------------------------------------
 
 /**
@@ -234,8 +167,15 @@ async function runOneStage({ stage, settings, instruction, generationId, signal,
     const slotName = settings.slotName;
     // 标记要真的写进槽位内容，否则 CHAT_COMPLETION_SETTINGS_READY
     // 那边认不出这份请求，bodyFields（思考开关）会被丢掉。
+    // 同一个标记也用来认领拦截到的流式分片 —— 见 stream-hook.js。
     const tag = makePayloadTag(generationId);
     let injected = false;
+
+    // 这一轮的实时正文与思维链。拦截是按标记归属的，所以这里攒到的
+    // 一定是**本次**请求的分片，不会混进上一轮的。
+    let liveText = '';
+    let liveReasoning = '';
+    let unsubscribe = null;
 
     try {
         if (signal?.aborted) throw Object.assign(new Error('user abort'), { name: 'AbortError' });
@@ -246,24 +186,40 @@ async function runOneStage({ stage, settings, instruction, generationId, signal,
         // 请求体附加字段走事件注入（provider 私有参数，例如思考开关）
         setPendingPayload(tag, { ...(settings.bodyFields ?? {}) });
 
+        const throttled = makeProgressThrottle(() => onProgress?.({
+            text: liveText,
+            reasoning: liveReasoning,
+        }));
+
+        unsubscribe = subscribeStream(tag, (evt) => {
+            // 拦截给的是累计值，直接覆盖，不用自己拼
+            if (typeof evt?.text === 'string') liveText = evt.text;
+            if (typeof evt?.reasoning === 'string') liveReasoning = evt.reasoning;
+            throttled();
+        });
+
         const content = await tavernGenerate({
             stage: settings,
             generationId,
             signal,
-            // 流式进度可能很密（每个分片一次）。写 DOM 有成本，平板上尤其明显，
-            // 所以节流到 ~8fps。顺便把到目前为止的思维链一起带上 ——
-            // 酒馆在流式中途就会发 STREAM_REASONING_DONE，这样用户能看到它在思考。
-            // ⚠️ tavernGenerate 回调过来的是**字符串**（累计全文），不是对象。
+            // ⚠️ 这个回调的参数是**字符串**（累计全文），不是对象。
             //
             // 这里曾经写的是 `info?.text ?? ''` —— 字符串身上没有 .text，
             // 于是每一次节流后的进度都带着空字符串发出去。
             // 症状极具迷惑性：js_stream_token_received_fully 明明发了上千次，
             // 面板却从头到尾一个字都不显示（「正文最后一次性蹦出来」）。
-            onProgress: makeProgressThrottle((chunk) => onProgress?.({
-                text: typeof chunk === 'string' ? chunk : String(chunk?.text ?? ''),
-                reasoning: peekReasoning(),
-            })),
+            //
+            // 酒馆助手这个事件只带正文，不带思维链，所以它现在只当**兜底**：
+            // 正文以我们自己拦截到的为准（那份更全，而且和思维链同源）。
+            onProgress: makeProgressThrottle((chunk) => {
+                const text = typeof chunk === 'string' ? chunk : String(chunk?.text ?? '');
+                if (text.length > liveText.length) liveText = text;
+                throttled();
+            }),
         });
+
+        // 最后补发一次，保证结尾几个字一定送到面板
+        onProgress?.({ text: liveText || String(content ?? ''), reasoning: liveReasoning });
 
         // 留档：事件里认领到的那份请求体（没认领到就是 null，本身就是结论）
         lastRequests[stage] = takeLastBody(tag) ?? {
@@ -272,8 +228,9 @@ async function runOneStage({ stage, settings, instruction, generationId, signal,
                 + '或者酒馆没发 CHAT_COMPLETION_SETTINGS_READY。附加参数多半没生效。',
         };
 
-        return { content: String(content ?? '').trim(), reasoning: takeReasoning() };
+        return { content: String(content ?? '').trim(), reasoning: liveReasoning };
     } finally {
+        try { unsubscribe?.(); } catch { /* 忽略 */ }
         clearPendingPayload(tag);
         if (injected) {
             await restoreSlot(slotName);
@@ -310,15 +267,9 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
 
     if (!String(draft ?? '').trim()) throw new Error('草稿是空的');
 
-    hookReasoning();
-
-    // ⚠️ 每次跑流水线先把上一轮留下的思维链清掉。
-    //
-    // reasonings 是模块级的 Map，它只在 takeReasoning() 里被清 ——
-    // 如果某次没走到那里（例如中途抛错），残留会一直留着，
-    // 于是下一轮 peekReasoning() 读到的其实是**上一轮的思维链**。
-    // 用户实测到的「第二次点的时候思维链框里显示上一次的」正是这个。
-    reasonings.clear();
+    // 思维链不再需要在这里清 —— 它现在是每个阶段自己从拦截到的流里攒的
+    // 局部变量，随阶段开始/结束天然隔离，跨不了轮。
+    // （之前那套是模块级 Map + 全局单槽，「第二轮闪出第一轮思维链」就是那么来的。）
 
     try {
         report('draft', { phase: 'done', text: draft, reasoning: draftReasoning });
@@ -448,7 +399,7 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
             final: finalResult,
         };
     } finally {
-        unhookReasoning();
+        // 每个阶段的订阅都在 runOneStage 的 finally 里退掉了，这里没有全局状态要收
     }
 }
 

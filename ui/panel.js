@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.25';
+import { demoState } from '../state.js?v=0.8.26';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -13,7 +13,6 @@ const MARGIN = 12;
 
 let panel = null;
 let logLines = [];
-let onAutoChange = null;
 let mountOptions = {};
 
 /**
@@ -339,7 +338,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.25';
+export const VERSION = '0.8.26';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -512,7 +511,12 @@ function bindEvents(el) {
     });
 
     el.querySelector('#aw-auto')?.addEventListener('change', (event) => {
-        onAutoChange?.(event.target.checked);
+        // ⚠️ 必须走 mountOptions。这里曾经调的是一个裸的模块级变量
+        // `onAutoChange`（L16 声明为 null 之后**再也没有被赋过值**），
+        // 所以 `onAutoChange?.(...)` 一直是空操作 ——
+        // 勾选框在界面上会动，但 settings.auto 永远停在默认的 false。
+        // 症状：日志里不管勾上还是取消都是「自动模式未开启」。
+        mountOptions.onAutoChange?.(event.target.checked);
     });
 
     el.querySelector('#aw-run')?.addEventListener('click', () => {
@@ -922,7 +926,7 @@ const PANEL_HTML = `
                 <details class="aw-details">
                     <summary>思维链 <span class="aw-stat" id="aw-critic-reasoning-stats"></span></summary>
                     <textarea id="aw-critic-reasoning" rows="6" readonly class="aw-reasoning"></textarea>
-                    <em class="aw-tip">多半一直是空的，<b>这不是坏了</b>：② 的思维链在酒馆内部确实攒下来了（<code>openai.js</code> 里 <code>state.reasoning</code>），但酒馆助手取正文时把它丢了，没有任何接口往外透。唯一会发 <code>STREAM_REASONING_DONE</code> 的是 <code>reasoning.js</code> 里的 <code>ReasoningHandler</code>，而全酒馆没有一处用它 —— 所以那个事件是死的。正文和结论不受影响。</em>
+                    <em class="aw-tip">思维链直接从**上游流式响应**里读（扩展拦了酒馆打给 <code>/api/backends/chat-completions/generate</code> 的那次 <code>fetch</code>），和正文一样是实时的。<br>一直是空的话按顺序查：①「参数」页点「运行自检」，看<b>上游流式拦截</b>那几行的数字；② <code>chunks</code> 在涨但思维链是 0 ⇒ 该渠道根本没回 <code>reasoning_content</code> / <code>reasoning</code> 字段（例如思考是关的）。</em>
                 </details>
             </div>
             <div class="aw-card">

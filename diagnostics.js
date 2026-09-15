@@ -7,8 +7,9 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION, getMountCount } from './ui/panel.js?v=0.8.25';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.25';
+import { log, setDiagOutput, VERSION, getMountCount } from './ui/panel.js?v=0.8.26';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.26';
+import { getStreamHookStats } from './stream-hook.js?v=0.8.26';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -52,6 +53,24 @@ async function collectEnvironment(context) {
     out.push(line('getWorldInfoPrompt', ok(typeof context?.getWorldInfoPrompt === 'function')));
     out.push(line('saveSettingsDebounced', ok(typeof context?.saveSettingsDebounced === 'function')));
     out.push(line('parseReasoningFromString', ok(typeof context?.parseReasoningFromString === 'function')));
+
+    // 上游拦截 —— 思维链和实时正文的唯一来源。
+    // 「拦到没有」必须是可观测的，否则出了问题只能靠猜。
+    const hook = getStreamHookStats();
+    out.push('');
+    out.push('=== 上游流式拦截 ===');
+    out.push(line('fetch 已替换', ok(hook.patched) + (hook.patched ? '' : '  ← 致命：思维链与实时正文都拿不到')));
+    if (hook.error) out.push(line('  出错', hook.error));
+    out.push(line('  打到生成端点的请求', String(hook.seen)));
+    out.push(line('  其中认领并拦截', String(hook.matched) + (hook.seen > 0 && hook.matched === 0
+        ? '  ← 一次都没认领上：槽位标记没进请求体？'
+        : '')));
+    out.push(line('  流式 / 非流式', `${hook.streaming} / ${hook.nonStreaming}`));
+    out.push(line('  收到分片', `${hook.chunks}（其中带思维链 ${hook.reasoningChunks}）`));
+    if (hook.errors.length) out.push(line('  解析中断', hook.errors.slice(-2).join(' | ')));
+    out.push('  说明：这四个数字是**本次页面加载以来**的累计值。');
+    out.push('  跑一次 ② 之后，matched 应该 +1、chunks 应该变大；');
+    out.push('  思维链一直是 0 就说明这个模型/渠道压根没回 reasoning 字段。');
 
     out.push('');
     out.push('=== 连接管理器 ===');
@@ -650,7 +669,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.25');
+        const mod = await import('./pipeline.js?v=0.8.26');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +899,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.25 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.26 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +937,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.25');
+        const mod = await import('./tavern.js?v=0.8.26');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +1010,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.25 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.26 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1069,7 +1088,7 @@ export async function probeViaTavernHelper(stage) {
 
     let tavern;
     try {
-        tavern = await import('./tavern.js?v=0.8.25');
+        tavern = await import('./tavern.js?v=0.8.26');
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1205,7 +1224,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.25'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.26'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;

@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.8.25';
+const VERSION = '0.8.26';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.8.25';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.25';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.25';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.8.26';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.26';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.26';
 import {
     mountPanel,
     unmountPanel,
@@ -27,12 +27,13 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.8.25';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.25';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.25';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.25';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.25';
-import * as notice from './notice.js?v=0.8.25';
+} from './ui/panel.js?v=0.8.26';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.26';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.26';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.26';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.26';
+import { patchFetch } from './stream-hook.js?v=0.8.26';
+import * as notice from './notice.js?v=0.8.26';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -582,6 +583,14 @@ function mountPanelOnce() {
 export function onActivate() {
     // 同步初始化：酒馆加载期、loader 还在转的时候。
     // 只挂悬浮球和菜单项，面板等 APP_READY / 兜底定时器。
+    try {
+        // 拦截上游流式 —— 实时正文和思维链都从这儿来。越早装越好，
+        // 免得第一次生成发生在拦截之前（那样那次就没有思维链可看）。
+        patchFetch();
+    } catch (error) {
+        console.error('[AgentWriter] 装上游拦截失败（思维链会看不到，正文不受影响）', error);
+    }
+
     try {
         startUI();
     } catch (error) {
