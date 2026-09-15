@@ -107,7 +107,15 @@ export const DEFAULT_SETTINGS = Object.freeze({
     critic: stageDefaults({
         temperature: 0.3,
         useStream: true,
-        useJsonSchema: true,
+        /**
+         * 默认关闭。
+         *
+         * 打开后会把 CRITIQUE_SCHEMA 作为请求体顶层 json_schema 发出去，
+         * 酒馆会转成 OpenAI 的 response_format —— 但自定义来源未必支持，
+         * 不支持时上游会报错或忽略，反而更糟。
+         * 默认靠提示词里写明的 JSON 结构约束输出，配合解析容错，通用性更好。
+         */
+        useJsonSchema: false,
         systemPrompt: DEFAULT_CRITIC_PROMPT,
         overridePayload: { thinking: { type: 'enabled' } },
     }),

@@ -5,12 +5,16 @@
  * ② 校验：独立连接配置，输出结构化问题清单
  * ③ 改写：独立连接配置，按清单改稿
  *
- * 关键实现约束（实测得来，不是推测）：
+ * 两条实测得来的关键约束：
  *
- *   部分上游（Cline）的**非流式响应包裹格式酒馆解析不了** ——
- *   HTTP 200、请求成功，但 content 是空字符串。
- *   所以成功判据必须是「正文非空」，不能是「HTTP 正常」；
- *   拿到空正文时自动重试一次流式。
+ * 1. 部分上游（Cline）的**非流式响应包裹格式酒馆解析不了** ——
+ *    HTTP 200、请求成功，但 content 是空字符串。
+ *    所以成功判据必须是「正文非空」，拿到空正文时自动换另一种模式重试。
+ *
+ * 2. `json_schema` 必须作为请求体的**顶层字段**传。
+ *    酒馆只有看到顶层 json_schema 才会把它转成 response_format；
+ *    塞进 custom_include_body 的话会被原样 merge 进请求体，
+ *    上游收到一个它不认识的 json_schema 对象。
  */
 
 import {
@@ -19,8 +23,9 @@ import {
     renderCritique,
     parseCritique,
     isClean,
+    looksRunaway,
     CRITIQUE_SCHEMA,
-} from './stages.js?v=0.4.0';
+} from './stages.js?v=0.4.1';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -45,7 +50,12 @@ function currentProfileId() {
 }
 
 /**
- * 把阶段设置变成 CustomApiConfig 需要的几块。
+ * 把阶段设置整理成发请求需要的东西。
+ *
+ * 拆成三块：
+ *   - options          传给 sendRequest 的第 4 个参数
+ *   - overridePayload  会被 merge 进请求体根字段
+ *   - topLevelPayload  必须是 request.body 顶层才生效的字段（例如 json_schema）
  */
 function buildRequestArgs(settings, messages, signal) {
     const profileId = settings.profileId || currentProfileId();
@@ -97,27 +107,29 @@ async function consumeStream(streamFn, onProgress) {
  * @param {object} options
  * @param {AbortSignal} [options.signal]
  * @param {(info: object) => void} [options.onProgress]
- * @param {object} [options.extraPayload] 额外请求体（例如 json_schema）
+ * @param {object} [options.topLevelPayload] 必须是 request.body 顶层的字段
  * @returns {Promise<{content:string, reasoning:string, mode:'stream'|'plain', retried:boolean}>}
  */
 export async function runStage(stage, settings, messages, options = {}) {
     const service = getService();
-    const { signal, onProgress, extraPayload } = options;
+    const { signal, onProgress, topLevelPayload } = options;
 
     const args = buildRequestArgs(settings, messages, signal);
-    const overridePayload = { ...args.overridePayload, ...(extraPayload ?? {}) };
 
     const attempt = async (useStream) => {
+        // 顶层字段混进请求体，而不是塞进 overridePayload
+        const requestData = { ...(topLevelPayload ?? {}) };
+
         const result = await service.sendRequest(
             args.profileId,
             args.messages,
             args.maxTokens,
             { ...args.options, stream: useStream },
-            overridePayload,
+            args.overridePayload,
+            requestData,
         );
 
         if (useStream) {
-            // 流式返回的是「产生迭代器的函数」
             if (typeof result !== 'function') {
                 return { content: '', reasoning: '', mode: 'stream' };
             }
@@ -151,17 +163,17 @@ export async function runStage(stage, settings, messages, options = {}) {
  * 跑完整流水线，并把结果写回聊天楼层。
  *
  * 注意 ②③ 走的是纯 HTTP 请求，**不会往 chat 里写任何东西**，
- * 所以不需要把草稿从 chat 里摘出去再放回来 —— 这是扩展形态相对脚本形态
- * 最大的简化。
+ * 所以不需要把草稿从 chat 里摘出去再放回来。
  *
  * @param {object} options
  * @param {object} options.settings 完整设置
  * @param {number} options.messageIndex 草稿所在楼层
  * @param {string} options.draft 草稿正文
+ * @param {string} [options.draftReasoning] 草稿的思维链（来自酒馆原生生成）
  * @param {(stage: string, info: object) => void} [options.onStage]
  * @param {AbortSignal} [options.signal]
  */
-export async function runPipeline({ settings, messageIndex, draft, onStage, signal }) {
+export async function runPipeline({ settings, messageIndex, draft, draftReasoning = '', onStage, signal }) {
     const context = ctx();
     if (!context) throw new Error('SillyTavern.getContext() 不可用');
 
@@ -177,18 +189,23 @@ export async function runPipeline({ settings, messageIndex, draft, onStage, sign
         throw new Error('草稿是空的');
     }
 
+    // 草稿本身先展示（含酒馆原生生成时的思维链）
+    report('draft', { phase: 'done', text: draft, reasoning: draftReasoning });
+
     // ---------- ② 校验 ----------
     report('critic', { phase: 'start' });
 
     const criticMessages = buildCriticMessages({
         settings: settings.critic,
         draft,
+        draftIndex: messageIndex,
         ctx: context,
     });
 
     const criticResult = await runStage('critic', settings.critic, criticMessages, {
         signal,
-        extraPayload: settings.critic.useJsonSchema ? { json_schema: CRITIQUE_SCHEMA } : {},
+        // json_schema 必须是顶层字段，酒馆才会转成 response_format
+        topLevelPayload: settings.critic.useJsonSchema ? { json_schema: CRITIQUE_SCHEMA } : {},
         onProgress: ({ text, reasoning, chunks }) => {
             report('critic', { phase: 'progress', text, reasoning, chunks });
         },
@@ -216,8 +233,23 @@ export async function runPipeline({ settings, messageIndex, draft, onStage, sign
         retried: criticResult.retried,
     });
 
+    // ---------- 校验跑飞就中止，别拿垃圾去改写 ----------
+    const runaway = looksRunaway(critiqueText, parsed);
+    if (runaway) {
+        report('final', { phase: 'skipped', reason: `校验结果疑似异常，已中止：${runaway}` });
+        return {
+            ok: false,
+            stage: 'critic',
+            reason: `校验结果疑似异常：${runaway}`,
+            draft,
+            critique: critiqueText,
+            parsed,
+            critic: criticResult,
+        };
+    }
+
     // ---------- 无需修改就跳过 ③ ----------
-    if (parsed && isClean(parsed)) {
+    if (isClean(parsed)) {
         report('final', { phase: 'skipped', reason: '校验判定无需修改' });
         return {
             ok: true,
@@ -230,7 +262,7 @@ export async function runPipeline({ settings, messageIndex, draft, onStage, sign
     }
 
     // ---------- ③ 改写 ----------
-    const critiqueForRewrite = parsed ? renderCritique(parsed) : critiqueText;
+    const critiqueForRewrite = renderCritique(parsed);
     report('final', { phase: 'start' });
 
     const rewriteMessages = buildRewriteMessages({
@@ -275,9 +307,9 @@ export async function runPipeline({ settings, messageIndex, draft, onStage, sign
         throw new Error(`找不到第 ${messageIndex} 楼`);
     }
 
+    // 记下原始草稿：调用方据此判断"这一层已经被处理过"，避免自动模式反复触发
+    message.extra = { ...(message.extra ?? {}), agent_writer: { draft } };
     message.mes = finalText;
-    // 换了正文，旧的 swipes / extra 不再对应
-    message.extra = {};
     if (Array.isArray(message.swipes) && message.swipes.length) {
         message.swipes = [finalText];
         message.swipe_id = 0;
@@ -297,6 +329,7 @@ export async function runPipeline({ settings, messageIndex, draft, onStage, sign
     return {
         ok: true,
         replaced: true,
+        messageIndex,
         draft,
         finalText,
         critique: critiqueText,
@@ -314,4 +347,35 @@ export function findLastAssistantIndex(chat) {
         if (m && !m.is_user && !m.is_system) return i;
     }
     return -1;
+}
+
+/**
+ * 取一条消息的思维链。
+ *
+ * 酒馆原生生成的思维链挂在消息对象上，不同版本字段不一样，所以多试几个位置。
+ * 拿不到就返回空串，不影响主流程。
+ */
+export function extractReasoning(message) {
+    if (!message || typeof message !== 'object') return '';
+
+    const candidates = [
+        message.extra?.reasoning,
+        message.extra?.reasoning_content,
+        message.reasoning,
+        message.reasoning_content,
+    ];
+    for (const c of candidates) {
+        if (typeof c === 'string' && c.trim()) return c;
+    }
+
+    const details = message.extra?.reasoning_details ?? message.reasoning_details;
+    if (Array.isArray(details)) {
+        const joined = details
+            .map((d) => (typeof d === 'string' ? d : (d?.text ?? d?.content ?? '')))
+            .filter(Boolean)
+            .join('\n');
+        if (joined.trim()) return joined;
+    }
+
+    return '';
 }

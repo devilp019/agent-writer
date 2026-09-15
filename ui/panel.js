@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.4.0';
+import { demoState } from '../state.js?v=0.4.1';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -79,7 +79,8 @@ function stageFieldsHTML(stage, settings) {
         </div>
         <label class="aw-switch aw-switch-block">
             <input type="checkbox" id="${id('jsonschema')}" ${s.useJsonSchema ? 'checked' : ''}>
-            <span>结构化输出（JSON Schema）</span>
+            <span>用原生 JSON Schema 约束输出</span>
+            <em class="aw-tip">默认关闭：会走酒馆的 response_format，自定义来源未必支持（不支持时上游会报错）。关闭时靠提示词约束格式，更通用。</em>
         </label>
         ` : ''}
 
@@ -490,7 +491,9 @@ export function mountPanel(options = {}) {
 
     makeHeaderDraggable(panel, panel.querySelector('#aw-header'));
     bindEvents(el);
+    wired = true;
     if (options.settings) renderStageCards(el, options.settings);
+    fillPromptEditors(el, options.settings);
     switchTab(options.settings?.ui?.tab ?? 'params');
     applyLayout();
 
@@ -512,7 +515,7 @@ function onViewportChange() {
 }
 
 export function showPanel() {
-    if (!ensurePanelMounted()) {
+    if (!ensurePanelReady()) {
         console.error('[AgentWriter] 面板挂载失败，无法显示');
         return;
     }
@@ -526,9 +529,31 @@ export function hidePanel() {
 
 export function togglePanel() {
     // 关键：面板可能因为初始化时序问题还没挂上，这里就地补挂，避免"球能点但没反应"
-    if (!ensurePanelMounted()) return;
+    if (!ensurePanelReady()) return;
     if (panel.style.display === 'flex') hidePanel();
     else showPanel();
+}
+
+let wired = false;
+
+/**
+ * 确保面板已装配（事件已绑定）。
+ *
+ * 不能只依赖 mountPanel 被调用过：如果面板是通过别的路径出现在 DOM 里的，
+ * 运行按钮的 handler 就永远不会接上，表现是「点了没反应」。
+ * 所以每次显示前再确认一次。
+ */
+function ensurePanelReady() {
+    if (!ensurePanelMounted()) return false;
+    if (!wired) {
+        try {
+            bindEvents(panel);
+            wired = true;
+        } catch (e) {
+            console.error('[AgentWriter] 补装配面板事件失败', e);
+        }
+    }
+    return true;
 }
 
 export function isPanelOpen() {
@@ -540,6 +565,39 @@ export function unmountPanel() {
     window.removeEventListener('orientationchange', onViewportChange);
     panel?.remove();
     panel = null;
+    wired = false;
+}
+
+/**
+ * 把提示词编辑器填上当前值。
+ *
+ * 之前这里只放了 placeholder，面板打开是空的 —— 看起来像"没有默认提示词"。
+ */
+function fillPromptEditors(el, settings) {
+    if (!settings) return;
+
+    const critic = el.querySelector('#aw-critic-prompt');
+    if (critic) {
+        critic.value = settings.critic?.systemPrompt ?? '';
+        critic.addEventListener('input', () => {
+            mountOptions.onPromptChange?.('critic', critic.value);
+        });
+    }
+
+    const rewrite = el.querySelector('#aw-rewrite-prompt');
+    if (rewrite) {
+        rewrite.value = settings.final?.systemPrompt ?? '';
+        rewrite.addEventListener('input', () => {
+            mountOptions.onPromptChange?.('final', rewrite.value);
+        });
+    }
+
+    const restore = el.querySelector('#aw-prompt-restore');
+    if (restore) {
+        restore.addEventListener('click', () => {
+            mountOptions.onPromptRestore?.();
+        });
+    }
 }
 
 /** 供 diagnostics 写入结果 */
@@ -643,13 +701,17 @@ const PANEL_HTML = `
         </section>
 
         <section class="aw-tab-panel" data-panel="prompts" hidden>
+            <div class="aw-row">
+                <button id="aw-prompt-restore" class="aw-btn">↺ 恢复默认提示词</button>
+            </div>
             <div class="aw-card">
                 <div class="aw-card-title">校验提示词</div>
-                <textarea id="aw-critic-prompt" rows="12" placeholder="下一步接入"></textarea>
+                <p class="aw-hint">输出格式要求由扩展在发送时自动追加，这里只写你希望的检查重点。</p>
+                <textarea id="aw-critic-prompt" rows="14"></textarea>
             </div>
             <div class="aw-card">
                 <div class="aw-card-title">改写提示词</div>
-                <textarea id="aw-rewrite-prompt" rows="12" placeholder="下一步接入"></textarea>
+                <textarea id="aw-rewrite-prompt" rows="14"></textarea>
             </div>
         </section>
 

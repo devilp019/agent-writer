@@ -7,7 +7,7 @@
  * - 图标一律 inline SVG，不用 emoji（三端字形不一致）
  */
 
-import { subscribe, STATES } from '../state.js?v=0.4.0';
+import { subscribe, STATES } from '../state.js?v=0.4.1';
 
 const FAB_ID = 'aw-fab';
 const SIZE = 48;

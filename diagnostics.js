@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput } from './ui/panel.js?v=0.4.0';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.4.0';
+import { log, setDiagOutput } from './ui/panel.js?v=0.4.1';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.4.1';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';

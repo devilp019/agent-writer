@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.4.0';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.4.0';
-import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.4.0';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.4.1';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.4.1';
+import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.4.1';
 import {
     mountPanel,
     unmountPanel,
@@ -26,10 +26,10 @@ import {
     writeOutput,
     clearOutputs,
     setRunning as setPanelRunning,
-} from './ui/panel.js?v=0.4.0';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.4.0';
-import { getSettings, saveSettings } from './config.js?v=0.4.0';
-import { runPipeline, findLastAssistantIndex } from './pipeline.js?v=0.4.0';
+} from './ui/panel.js?v=0.4.1';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.4.1';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.4.1';
+import { runPipeline, findLastAssistantIndex, extractReasoning } from './pipeline.js?v=0.4.1';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -140,6 +140,16 @@ async function runPipelineNow(source) {
         return;
     }
 
+    // 已经处理过的楼层不再处理 —— 否则自动模式下写回的正文会被当成本轮草稿，
+    // 于是「跑完一遍又自动开始下一遍」，无限循环。
+    const already = chat[index]?.extra?.agent_writer?.draft;
+    if (already !== undefined && already === draft) {
+        log('这一层已经处理过且内容未变，跳过（避免自动模式循环）');
+        return;
+    }
+
+    const draftReasoning = extractReasoning(chat[index]);
+
     const controller = new AbortController();
     runner = { controller, source };
     setPanelRunning(true, '⏳ 校验中…');
@@ -150,6 +160,7 @@ async function runPipelineNow(source) {
             settings,
             messageIndex: index,
             draft,
+            draftReasoning,
             signal: controller.signal,
             onStage: (stage, info) => {
                 const isCritic = stage === 'critic';
@@ -391,6 +402,23 @@ function mountPanelOnce() {
                 const s = getSettings();
                 s[stage] = { ...s[stage], ...next };
                 saveSettings();
+            },
+            onPromptChange: (stage, text) => {
+                const s = getSettings();
+                if (s[stage]) s[stage].systemPrompt = text;
+                saveSettings();
+            },
+            onPromptRestore: () => {
+                const s = getSettings();
+                s.critic.systemPrompt = DEFAULT_CRITIC_PROMPT;
+                s.final.systemPrompt = DEFAULT_REWRITE_PROMPT;
+                saveSettings({ immediate: true });
+                const panel = document.getElementById('aw-panel');
+                const critic = panel?.querySelector('#aw-critic-prompt');
+                const rewrite = panel?.querySelector('#aw-rewrite-prompt');
+                if (critic) critic.value = DEFAULT_CRITIC_PROMPT;
+                if (rewrite) rewrite.value = DEFAULT_REWRITE_PROMPT;
+                log('已恢复默认提示词');
             },
             onTabChange: (tab) => {
                 const s = getSettings();
