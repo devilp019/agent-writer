@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION, getMountCount } from './ui/panel.js?v=0.8.24';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.24';
+import { log, setDiagOutput, VERSION, getMountCount } from './ui/panel.js?v=0.8.25';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.25';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.24');
+        const mod = await import('./pipeline.js?v=0.8.25');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.24 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.25 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.24');
+        const mod = await import('./tavern.js?v=0.8.25');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.24 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.25 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1069,7 +1069,7 @@ export async function probeViaTavernHelper(stage) {
 
     let tavern;
     try {
-        tavern = await import('./tavern.js?v=0.8.24');
+        tavern = await import('./tavern.js?v=0.8.25');
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1205,7 +1205,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.24'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.25'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1627,13 +1627,17 @@ export async function watchStreamEvents(seconds = 20) {
             if (!h) {
                 body.push(`  ○ ${label}  —— 没发生`);
             } else {
-                body.push(`  ● ${label}  —— ${h.count} 次`);
-                if (h.sample) body.push(`      参数: ${h.sample}`);
+                body.push(`  ● ${label}  —— ${h.count} 次（其中带文本 ${h.nonEmpty ?? 0} 次）`);
+                if (h.sample) body.push(`      样本(非空): ${h.sample}`);
+                if (h.firstSample && h.firstSample !== h.sample) {
+                    body.push(`      首次:      ${h.firstSample}`);
+                }
             }
         }
         body.push('');
         body.push('怎么看：');
-        body.push('  · ★ 那两个是扩展依赖的。js_stream_token_received_fully 没发生 ⇒ 流式进度必然不动');
+        body.push('  · ★ 那两个是扩展依赖的。带文本 0 次 ⇒ 事件在发但没内容，进度必然不动');
+        body.push('  · 首次样本是空串属正常（思考型模型首个分片只有思维链，正文为空）');
         body.push('  · STREAM_REASONING_DONE 没发生 ⇒ 思维链抓不到（那条路只能靠它）');
         body.push('  · 看它的参数形状，能判断思维链是在第一个参数里还是在 state 里');
         setDiagOutput(body.join('\n'));
@@ -1643,17 +1647,27 @@ export async function watchStreamEvents(seconds = 20) {
     for (const [label, name] of wanted) {
         try {
             const sub = es.on(name, (...args) => {
-                const prev = hits.get(label) ?? { count: 0, sample: '' };
+                const prev = hits.get(label) ?? { count: 0, sample: '', firstSample: '', nonEmpty: 0 };
                 prev.count++;
-                if (!prev.sample) {
-                    prev.sample = args
-                        .map((a) => {
-                            if (typeof a === 'string') return `"${a.slice(0, 60)}"`;
-                            if (a && typeof a === 'object') return `{${Object.keys(a).slice(0, 8).join(',')}}`;
-                            return String(a);
-                        })
-                        .join(' | ');
-                }
+
+                const text = typeof args[0] === 'string' ? args[0] : '';
+                if (text) prev.nonEmpty++;
+
+                const format = () => args
+                    .map((a) => {
+                        if (typeof a === 'string') return `"${a.slice(0, 60)}"`;
+                        if (a && typeof a === 'object') return `{${Object.keys(a).slice(0, 8).join(',')}}`;
+                        return String(a);
+                    })
+                    .join(' | ');
+
+                // 第一次的参数往往没参考价值 —— 思考型模型的首个分片只有
+                // reasoning_content，正文是空字符串，于是「首个样本」永远是 ""。
+                // 之前只留第一个样本，结果把一个完全正常的事件判成了没带文本。
+                // 所以首样本和最新的非空样本都留下。
+                if (!prev.firstSample) prev.firstSample = format();
+                if (text || !prev.sample) prev.sample = format();
+
                 hits.set(label, prev);
                 render();
             });

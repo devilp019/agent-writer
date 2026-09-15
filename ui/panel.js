@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.24';
+import { demoState } from '../state.js?v=0.8.25';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -86,9 +86,9 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         </label>
 
         <label class="aw-field">
-            <span>附加请求体字段（原文发送，可以写不严格的 JSON）</span>
+            <span>附加请求体字段（必须写能解析的 JSON）</span>
             <textarea id="${id('bodyfields')}" rows="4">${esc(bodyFieldsText(s))}</textarea>
-            <em class="aw-tip">这里的内容会**原样**发给上游（走 custom_include_body，酒馆不解析它）。所以你可以写不严格的 JSON —— 例如故意留个尾逗号，反而能让酒馆不去过滤它不认识的字段（providerOptions 这类）。<br>DeepSeek 官方 API 的思考开关：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。<b>Cline 例外：</b>实测它把 <code>thinking</code> 和 <code>reasoning_effort</code> 都静默忽略，关不掉。</em>
+            <em class="aw-tip">这里的内容走 <code>custom_include_body</code>，酒馆后端会用 <code>mergeObjectWithYaml</code> <b>合并</b>进请求体 —— 它是合并而不是过滤，不认识的字段（<code>providerOptions</code> 这类）不会被丢掉，所以不需要什么「绕过解析」的技巧。<br><b>但必须写能解析的 JSON。</b>曾经流传「故意留个尾逗号能让酒馆跳过过滤」——<b>实测是反的</b>：解析失败时那个 <code>catch</code> 什么都不做，结果是<b>一个字段都加不上</b>（上游直接回 <code>Error parsing request</code>）。<br>DeepSeek 官方 API 的思考开关：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。<b>Cline 例外：</b>实测它把 <code>thinking</code> 和 <code>reasoning_effort</code> 都静默忽略（三种写法下思维链分片数 96 / 111 / 112，基本没变），关不掉。</em>
             <em class="aw-tip">指向 Cline 时，<b>「流式」必须打开</b>：它的非流式响应会多包一层 <code>data</code>，酒馆解析不到正文，会得到「成功但返回为空」。</em>
         </label>
 
@@ -339,7 +339,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.24';
+export const VERSION = '0.8.25';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -422,12 +422,56 @@ export function clearOutputs() {
 }
 
 /** 运行按钮的忙碌态 */
+/**
+ * 忙碌时的秒表。
+ *
+ * 为什么需要它：② 是开着思考跑的，思考期间上游只回思维链分片、正文一个字都没有。
+ * 于是进度框必然长时间空着 —— 没有秒表的话，面板看上去就跟卡死了一样，
+ * 而用户根本分不清「在思考」和「挂了」。（思维链本身取不到：
+ * 酒馆助手把 state.reasoning 收下后就没往外给过，STREAM_REASONING_DONE
+ * 只由 reasoning.js 里的 ReasoningHandler 发，而没有任何地方用它。）
+ */
+let busyStartedAt = 0;
+let busyLabel = '';
+let busyTimer = null;
+
+function stopBusyTimer() {
+    if (busyTimer) {
+        clearInterval(busyTimer);
+        busyTimer = null;
+    }
+    busyStartedAt = 0;
+    busyLabel = '';
+}
+
+function paintBusyLabel() {
+    const run = document.getElementById('aw-run');
+    if (!run || !busyStartedAt) return;
+    const secs = Math.floor((Date.now() - busyStartedAt) / 1000);
+    run.textContent = `${busyLabel} ${secs}s`;
+}
+
 export function setRunning(busy, label) {
     const run = document.getElementById('aw-run');
     const stop = document.getElementById('aw-stop');
     if (run) {
         run.disabled = !!busy;
-        run.textContent = busy ? (label ?? '⏳ 运行中…') : '▶ 用最后一条 AI 回复作草稿';
+        if (busy) {
+            const text = label ?? '⏳ 运行中…';
+            // 只有标签真的换了或者刚开跑，才重置秒表 ——
+            // ②③ 交接时不应该把已经跑掉的时间抹掉。
+            if (text !== busyLabel || !busyStartedAt) {
+                busyLabel = text;
+                if (!busyStartedAt) busyStartedAt = Date.now();
+            }
+            paintBusyLabel();
+            if (!busyTimer) {
+                busyTimer = setInterval(paintBusyLabel, 1000);
+            }
+        } else {
+            stopBusyTimer();
+            run.textContent = '▶ 用最后一条 AI 回复作草稿';
+        }
     }
     if (stop) stop.disabled = !busy;
 }
@@ -878,6 +922,7 @@ const PANEL_HTML = `
                 <details class="aw-details">
                     <summary>思维链 <span class="aw-stat" id="aw-critic-reasoning-stats"></span></summary>
                     <textarea id="aw-critic-reasoning" rows="6" readonly class="aw-reasoning"></textarea>
+                    <em class="aw-tip">多半一直是空的，<b>这不是坏了</b>：② 的思维链在酒馆内部确实攒下来了（<code>openai.js</code> 里 <code>state.reasoning</code>），但酒馆助手取正文时把它丢了，没有任何接口往外透。唯一会发 <code>STREAM_REASONING_DONE</code> 的是 <code>reasoning.js</code> 里的 <code>ReasoningHandler</code>，而全酒馆没有一处用它 —— 所以那个事件是死的。正文和结论不受影响。</em>
                 </details>
             </div>
             <div class="aw-card">

@@ -24,7 +24,7 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
-} from './stages.js?v=0.8.24';
+} from './stages.js?v=0.8.25';
 import {
     injectSlot,
     restoreSlot,
@@ -34,7 +34,7 @@ import {
     makePayloadTag,
     takeLastBody,
     recoverSlots,
-} from './tavern.js?v=0.8.24';
+} from './tavern.js?v=0.8.25';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -103,6 +103,26 @@ export function extractReasoning(message) {
 const reasonings = new Map();
 let reasoningHook = null;
 
+/**
+ * 思维链监听。
+ *
+ * ⚠️ 结论（已核实，别再花时间查了）：**这条路上拿不到思维链，永远拿不到。**
+ *
+ *   · 思维链在酒馆内部是攒下来了 —— openai.js:3290 对 custom 源做
+ *     `state.reasoning += delta.reasoning_content ?? delta.reasoning`，
+ *     并且这个 state 会跟着流式分片一起 yield 出来。
+ *   · 但酒馆助手把它们收下之后只读 `state.signature` 和 `state.toolSignatures`
+ *     （responseGenerator.ts:142-149），`state.reasoning` 直接丢掉了，
+ *     也没有任何事件把它带出来。
+ *   · 唯一会 emit STREAM_REASONING_DONE 的地方是酒馆的
+ *     public/scripts/reasoning.js:549（ReasoningHandler 类），
+ *     而全仓库没有任何文件 import 这个类 —— 这个事件等于死的。
+ *     （跟 STREAM_TOKEN_RECEIVED 一样：只在 events.js 里定义过，从没发过。）
+ *
+ * 所以这里挂的监听是**防御性**的：万一以后酒馆或酒馆助手开始发它，就能自动
+ * 接上；现在它一枪不放。界面上对应的「思维链」框会一直是空的，那是正常的，
+ * 不代表流水线有问题。
+ */
 function hookReasoning() {
     if (hookReasoning.unavailable) return;
     const context = ctx();
@@ -233,8 +253,14 @@ async function runOneStage({ stage, settings, instruction, generationId, signal,
             // 流式进度可能很密（每个分片一次）。写 DOM 有成本，平板上尤其明显，
             // 所以节流到 ~8fps。顺便把到目前为止的思维链一起带上 ——
             // 酒馆在流式中途就会发 STREAM_REASONING_DONE，这样用户能看到它在思考。
-            onProgress: makeProgressThrottle((info) => onProgress?.({
-                text: info?.text ?? '',
+            // ⚠️ tavernGenerate 回调过来的是**字符串**（累计全文），不是对象。
+            //
+            // 这里曾经写的是 `info?.text ?? ''` —— 字符串身上没有 .text，
+            // 于是每一次节流后的进度都带着空字符串发出去。
+            // 症状极具迷惑性：js_stream_token_received_fully 明明发了上千次，
+            // 面板却从头到尾一个字都不显示（「正文最后一次性蹦出来」）。
+            onProgress: makeProgressThrottle((chunk) => onProgress?.({
+                text: typeof chunk === 'string' ? chunk : String(chunk?.text ?? ''),
                 reasoning: peekReasoning(),
             })),
         });
