@@ -263,6 +263,22 @@ node smoke.mjs              # 99 项：面板、状态机、菜单项、可见�
 
 全绿再推。
 
+### 推送需要代理
+
+**直连 github.com 会被重置**（本机走 Clash Verge，系统代理 `127.0.0.1:7897`，
+但 git 默认不读系统代理）。仓库级已经配好了：
+
+```bash
+git config http.proxy  http://127.0.0.1:7897
+git config https.proxy http://127.0.0.1:7897
+```
+
+另外本机 git 的 schannel 后端在部分环境里会报
+`AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`，
+已改用 OpenSSL：`git config http.sslBackend openssl`。
+
+推送凭证存在 Windows 凭据管理器里，由 Git Credential Manager 提供。
+
 ### 改版本号要同时改多处
 
 `manifest.json` 的 `version`、`index.js` 的 `VERSION`、`ui/panel.js` 的 `VERSION`、
@@ -277,6 +293,20 @@ node smoke.mjs              # 99 项：面板、状态机、菜单项、可见�
 写死会让测试和扩展各自加载出**两个互不相干的模块实例**（例如两个 `state.js`），
 `setState` 设在一个上、组件读的是另一个，断言会以「看起来像功能坏了」的方式失败。
 `check-version.mjs` 会拦住这种写法。
+
+### 用 PowerShell 改文件要小心
+
+本项目已经因为 PowerShell 的默认编码踩过三次静默损坏，每次症状都不同：
+
+| 操作 | 后果 | 症状 |
+|---|---|---|
+| `Set-Content -Encoding UTF8` | 写进 BOM | `manifest.json` 直接 `JSON.parse` 失败，酒馆读不到扩展 |
+| `Get-Content -Raw`（不带 `-Encoding`） | 按 ANSI/GBK 读中文 | 读坏了再写回去，文件变乱码 |
+| `cmd /c "... > file"` | 按 UTF-16 重定向 | 文件变成一堆 NUL 字节，模块加载直接失败 |
+
+**改完一律跑 `node strip-bom.mjs ..\agent-writer`** —— 它会拦下 BOM、空文件、
+NUL 字节和 `U+FFFD` 编码损坏四种情况。另外 `Get-Content` / `Set-Content`
+一定要显式带 `-Encoding UTF8`。
 
 ---
 
