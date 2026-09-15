@@ -12,11 +12,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 
-import { setState, setDemoHandler } from './state.js?v=0.3.0';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.3.0';
-import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.3.0';
+import { setState, setDemoHandler } from './state.js?v=0.3.1';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.3.1';
+import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.3.1';
 import {
     mountPanel,
     unmountPanel,
@@ -25,8 +25,8 @@ import {
     log,
     setDiagOutput,
     getAutoCheckbox,
-} from './ui/panel.js?v=0.3.0';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.3.0';
+} from './ui/panel.js?v=0.3.1';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.3.1';
 
 const MODULE_NAME = 'agent_writer';
 
