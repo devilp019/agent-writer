@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.4';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.4';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.5';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.5';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.4');
+        const mod = await import('./pipeline.js?v=0.8.5');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.4 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.5 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.4');
+        const mod = await import('./tavern.js?v=0.8.5');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -964,6 +964,22 @@ export async function dumpChannelPlan(settings) {
         out.push('custom_api = ' + JSON.stringify(redact(api), null, 2));
         out.push('');
 
+        // 思考开关不在这里 —— 它走 CHAT_COMPLETION_SETTINGS_READY 事件注入，
+        // 是另一条路。不显示的话，用户没法从这个 dump 确认自己的思考设置。
+        const fields = s.bodyFields ?? {};
+        const hasThinking = Object.prototype.hasOwnProperty.call(fields, 'thinking');
+        out.push('附加请求体字段（思考开关走这条，不在上面的 custom_api 里）:');
+        out.push('  ' + (Object.keys(fields).length ? JSON.stringify(fields) : '{}  ← 空'));
+        if (hasThinking) {
+            out.push(`  ⇒ thinking.type = ${JSON.stringify(fields.thinking?.type)}`);
+        } else {
+            out.push('  ⚠ 没设 thinking，上游默认值会生效 ——');
+            out.push('     DeepSeek 官方 API 默认**开**思考，要关就得显式写');
+            out.push('     {"thinking":{"type":"disabled"}}。');
+            out.push('     Cline 则是怎么写都关不掉（实测它静默忽略这个字段）。');
+        }
+        out.push('');
+
         if (s.apiUrl && !s.apiKey) {
             out.push('⚠ 填了地址但没填密钥 —— 酒馆会退回「当前连接」的凭据，');
             out.push('  拿别的密钥去打这个端点，必然认证失败。');
@@ -975,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.4 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.5 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -984,6 +1000,7 @@ export async function dumpChannelPlan(settings) {
     out.push('  · custom_include_headers.Authorization 应该是「裸 key」');
     out.push('  · 不该出现 custom_api.key');
     out.push('  · 地址应该是 base url，/chat/completions 由酒馆补');
+    out.push('  · 思考开关在「附加请求体字段」那一节，不在 custom_api 里');
 
     const text = out.join('\n');
     setDiagOutput(text);

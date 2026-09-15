@@ -260,13 +260,62 @@ export function takeLastBody(tag) {
     return body;
 }
 
-/** 只保留可 JSON 序列化、且不含密钥的顶层字段摘要 */
-function summarizeBody(generateData) {
+/**
+ * 从 YAML 形式的 custom_include_headers 里抽出 `键 → 值`。
+ *
+ * 为什么不直接调 jsyaml：那是酒馆的全局，不保证一定在（测试环境里就没有），
+ * 而这里只需要认出「有哪些头、值多长」。所以自己按行解析，
+ * 不认识的行原样保留键名 —— 够用且没有依赖。
+ *
+ * 输出里**不包含值本身**，只有长度。
+ */
+function describeYamlHeaders(yamlText) {
+    const out = {};
+    for (const line of String(yamlText).split('\n')) {
+        const m = /^\s*([^:#\s][^:]*?)\s*:\s*(.*)$/.exec(line);
+        if (!m) continue;
+        const key = m[1].replace(/^["']|["']$/g, '').trim();
+        const value = m[2].trim().replace(/^["']|["']$/g, '');
+        if (!key) continue;
+        out[key] = /^Bearer\s+/i.test(value)
+            ? `Bearer <已打码>（长度 ${value.length}）  ⚠ 带 Bearer 前缀`
+            : `<已打码>（长度 ${value.length}）`;
+    }
+    return Object.keys(out).length ? out : { '(没解析出请求头)': String(yamlText).slice(0, 200) };
+}
+
+/**
+ * 只保留可 JSON 序列化、且不含密钥的顶层字段摘要。
+ *
+ * 两个例外必须原样显示 —— 排查换渠道问题时它们才是主角：
+ *   · custom_include_headers：决定送什么凭据。但值会被打码，只留结构。
+ *   · custom_url：决定打到哪个地址。
+ */
+export function summarizeBody(generateData) {
     const out = {};
     for (const [key, value] of Object.entries(generateData)) {
         if (key === 'messages') {
             const list = Array.isArray(value) ? value : [];
             out.messages = `（${list.length} 条，已省略）`;
+            continue;
+        }
+        if (key === 'custom_include_headers') {
+            // 结构要看清（有没有 Authorization、键名对不对、值带没带 Bearer），
+            // 值一律打码 —— 只给长度，够和面板里填的对照。
+            if (typeof value === 'string') {
+                out.custom_include_headers = describeYamlHeaders(value);
+            } else if (value && typeof value === 'object') {
+                const redacted = {};
+                for (const [h, v] of Object.entries(value)) {
+                    const s = String(v ?? '');
+                    redacted[h] = /^Bearer\s+/i.test(s)
+                        ? `Bearer <已打码>（长度 ${s.length}）  ⚠ 带 Bearer 前缀`
+                        : `<已打码>（长度 ${s.length}）`;
+                }
+                out.custom_include_headers = redacted;
+            } else {
+                out.custom_include_headers = '(空)';
+            }
             continue;
         }
         // 别把密钥写进面板里
