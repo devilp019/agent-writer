@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.19';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.19';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.22';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.22';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.19');
+        const mod = await import('./pipeline.js?v=0.8.22');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.19 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.22 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.19');
+        const mod = await import('./tavern.js?v=0.8.22');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.19 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.22 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1069,7 +1069,7 @@ export async function probeViaTavernHelper(stage) {
 
     let tavern;
     try {
-        tavern = await import('./tavern.js?v=0.8.19');
+        tavern = await import('./tavern.js?v=0.8.22');
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1205,7 +1205,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.19'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.22'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1495,6 +1495,14 @@ export function snapshotSettings() {
     } catch { /* 读不到 */ }
 
     return {
+        // 扩展**读到的** auto —— 触发钩子判断用的就是它
+        'settings.auto': (() => {
+            try { return context.extensionSettings?.agent_writer?.auto ?? '(没有)'; } catch { return '(读不到)'; }
+        })(),
+        // 面板勾选框的状态 —— 用户看到的。两者不一致就是「我明明开了却不跑」的原因
+        '面板勾选框 checked': (() => {
+            try { return document.getElementById('aw-auto')?.checked ?? '(没有这个控件)'; } catch { return '(读不到)'; }
+        })(),
         chat_completion_source: oai?.chat_completion_source ?? null,
         custom_url: oai?.custom_url ?? null,
         custom_model: oai?.custom_model ?? null,
