@@ -7,7 +7,7 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput } from './ui/panel.js?v=0.7.0';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.7.0';
 import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.7.0';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
@@ -33,7 +33,7 @@ async function collectEnvironment(context) {
     const out = [];
 
     out.push('=== 环境 ===');
-    out.push(line('扩展版本', '0.1.0'));
+    out.push(line('扩展版本', VERSION ?? '(未导出)'));
     out.push(line('getContext()', ok(context) + (context ? '' : '  ← 致命：扩展环境异常')));
     out.push(line('ST 版本', context?.version ?? '(ctx.version 未暴露)'));
     out.push(line('主 API', context?.mainApi ?? '(空)'));
@@ -637,10 +637,13 @@ export async function probeShape(model) {
  * 显示最近一次各阶段实际发出的请求体。
  *
  * 「附加参数没发出去」这类问题，看代码看不出来 —— 必须看真实请求。
- * 这里同时给出三样东西，缺一不可：
- *   1. overridePayload  我以为 merge 进去的
- *   2. requestData      我以为走顶层传的
- *   3. merged           两者合并后、真正要发的内容
+ * 数据来自 CHAT_COMPLETION_SETTINGS_READY 事件里那一份 generate_data
+ * （注入之后的快照），不是我以为发了什么。
+ *
+ * 三种结果对应三种病因：
+ *   · 显示「没认领到」     ⇒ 槽位标记没进 messages，或事件根本没发
+ *   · 认领到了但字段是空的 ⇒ 面板里那个阶段没填附加参数
+ *   · 字段在、模型行为不符 ⇒ 上游不认这个字段名（各家写法不一样）
  */
 export async function showLastRequests() {
     const out = [];
@@ -648,41 +651,49 @@ export async function showLastRequests() {
     let snapshot;
     try {
         const mod = await import('./pipeline.js?v=0.7.0');
-        snapshot = mod.getLastRequests();
+        snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
+        return null;
+    }
+
+    if (!snapshot) {
+        setDiagOutput('读不到最近请求记录（pipeline.getLastRequests 不可用）。');
         return null;
     }
 
     const pretty = (v) => (v == null ? '(无)' : JSON.stringify(v, null, 2));
 
     for (const stage of ['critic', 'final']) {
-        const record = snapshot?.[stage];
+        const record = snapshot[stage];
         out.push(`=== ${stage === 'critic' ? '② 校验' : '③ 改写'} ===`);
         if (!record) {
             out.push('（还没跑过这个阶段）');
             out.push('');
             continue;
         }
-        out.push(`连接配置: ${record.profileId}`);
-        out.push(`流式: ${record.stream}`);
-        out.push(`停止字段: ${record.abortFlag || '(未设置)'}`);
+
+        if (record.claimed === false) {
+            out.push('✘ 没认领到这次请求');
+            out.push(`  ${record.note ?? ''}`);
+            out.push('');
+            continue;
+        }
+
+        out.push('✔ 已认领并注入');
+        out.push('-- 本次附加的字段 --');
+        out.push(pretty(record.applied));
         out.push('');
-        out.push('-- overridePayload（会 merge 进请求体）--');
-        out.push(pretty(record.overridePayload));
-        out.push('');
-        out.push('-- requestData（走顶层传入）--');
-        out.push(pretty(record.requestData));
-        out.push('');
-        out.push('-- 合并后实际发出 --');
-        out.push(pretty(record.merged));
+        out.push('-- 注入后请求体顶层字段（messages 省略）--');
+        out.push(pretty(record.body));
         out.push('');
     }
 
     out.push('排查要点：');
-    out.push('  · 「合并后实际发出」里没有你在面板里填的东西 ⇒ 合并那一步有问题');
-    out.push('  · 有，但模型行为不符 ⇒ 上游不认这个字段名（各家不一样）');
-    out.push('  · 停止字段留空 ⇒ 只能靠断开连接中止，部分上游不吃这套');
+    out.push('  · 「没认领到」 ⇒ 附加参数根本没发出去，不是上游不认');
+    out.push('  · 「本次附加的字段」是 {} ⇒ 面板里那个阶段没填附加参数');
+    out.push('  · 字段在、模型行为不符 ⇒ 上游不认这个字段名（各家写法不一样）');
+    out.push('  · reasoning_effort 只调「想多久」，关思考要用 thinking');
 
     const text = out.join('\n');
     setDiagOutput(text);

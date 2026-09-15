@@ -245,6 +245,45 @@ export async function recoverSlots(slotNames) {
 const pendingPayloads = new Map();
 let hooked = false;
 
+/**
+ * 按标记留档「事件里那份 generate_data」的顶层字段。
+ *
+ * 这是唯一能自证「附加参数到底发出去没有」的地方 —— 平板开不了 devtools，
+ * 看不到真实请求。记的是认领成功那一刻的快照。
+ */
+const lastBodies = new Map();
+
+/** 取走并清掉某次请求的留档（供 pipeline 写进最近请求记录） */
+export function takeLastBody(tag) {
+    const body = lastBodies.get(tag) ?? null;
+    lastBodies.delete(tag);
+    return body;
+}
+
+/** 只保留可 JSON 序列化、且不含密钥的顶层字段摘要 */
+function summarizeBody(generateData) {
+    const out = {};
+    for (const [key, value] of Object.entries(generateData)) {
+        if (key === 'messages') {
+            const list = Array.isArray(value) ? value : [];
+            out.messages = `（${list.length} 条，已省略）`;
+            continue;
+        }
+        // 别把密钥写进面板里
+        if (/secret|key|password|token|authorization/i.test(key)) {
+            out[key] = '(已省略)';
+            continue;
+        }
+        try {
+            JSON.stringify(value);
+            out[key] = value;
+        } catch {
+            out[key] = '(无法序列化)';
+        }
+    }
+    return out;
+}
+
 function hookRequestBody() {
     if (hooked) return;
     const ctx = settingsApi();
@@ -263,6 +302,10 @@ function hookRequestBody() {
 
             Object.assign(generateData, entry.payload);
             console.log(`[AgentWriter] 已注入请求体字段：`, entry.payload);
+
+            // 留档的是注入**之后**的样子 —— 这样面板上看到的就是真正要发的
+            lastBodies.set(id, { claimed: true, applied: { ...entry.payload }, body: summarizeBody(generateData) });
+
             pendingPayloads.delete(id);
             break;
         }

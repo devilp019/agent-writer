@@ -292,6 +292,14 @@ function makeHeaderDraggable(el, handle) {
 // 日志
 // ---------------------------------------------------------------------------
 
+/**
+ * 面板自己的一份版本号，只给自检显示用。
+ * 真正的版本源是 index.js 的 VERSION —— 这里刻意不去 import 它，
+ * 否则会形成 index → panel → index 的循环依赖。
+ * check-version.mjs 会核对两者一致。
+ */
+export const VERSION = '0.7.0';
+
 export function log(message) {
     const time = new Date().toLocaleTimeString();
     logLines.push(`[${time}] ${message}`);

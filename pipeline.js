@@ -32,11 +32,26 @@ import {
     setPendingPayload,
     clearPendingPayload,
     makePayloadTag,
+    takeLastBody,
     recoverSlots,
 } from './tavern.js?v=0.7.0';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// 最近一次请求体留档
+//
+// 平板开不了 devtools，「附加参数到底有没有发出去」只能靠面板回显。
+// 记的是**事件里真正要发的那份 generate_data**（注入后），不是我以为发了什么。
+// ---------------------------------------------------------------------------
+
+const lastRequests = { critic: null, final: null };
+
+/** 供 diagnostics.showLastRequests() 读取 */
+export function getLastRequests() {
+    return lastRequests;
 }
 
 /** 找最后一条 assistant 楼层 */
@@ -164,6 +179,13 @@ async function runOneStage({ stage, settings, instruction, generationId, signal,
             signal,
             onProgress: (text) => onProgress?.({ text, reasoning: '' }),
         });
+
+        // 留档：事件里认领到的那份请求体（没认领到就是 null，本身就是结论）
+        lastRequests[stage] = takeLastBody(tag) ?? {
+            claimed: false,
+            note: '事件里没有认领到这次请求 —— 槽位标记没出现在 messages 里，'
+                + '或者酒馆没发 CHAT_COMPLETION_SETTINGS_READY。附加参数多半没生效。',
+        };
 
         return { content: String(content ?? '').trim(), reasoning: takeReasoning() };
     } finally {
