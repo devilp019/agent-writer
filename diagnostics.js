@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.14';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.14';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.15';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.15';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.14');
+        const mod = await import('./pipeline.js?v=0.8.15');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.14 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.15 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.14');
+        const mod = await import('./tavern.js?v=0.8.15');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.14 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.15 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1006,6 +1006,39 @@ export async function dumpChannelPlan(settings) {
     setDiagOutput(text);
     log('已导出扩展实际构造的 custom_api');
     return text;
+}
+
+/** 把 Authorization 脱敏，但保留能否看出「有没有 Bearer 前缀」 */
+function redactAuth(v) {
+    return String(v ?? '')
+        .replace(/Bearer\s+\S+/g, 'Bearer <已打码>')
+        .replace(/sk_\S+/g, '<已打码>');
+}
+
+/**
+ * 打出这次请求的关键操作数。
+ *
+ * 前面几轮反复绕的原因就是只看结论、不看送出去的东西到底长什么样。
+ * 这里把 custom_url 和 custom_include_headers 脱敏后原样显示，
+ * 并直接点明「有没有 Bearer 前缀」——那是 401 的实际触发点。
+ */
+function describeKeyFields(body, say) {
+    say('--- 这次实际发出的关键字段 ---');
+    say(`custom_url              ${JSON.stringify(body.custom_url ?? null)}`);
+
+    const raw = body.custom_include_headers;
+    if (typeof raw === 'string') {
+        say(`custom_include_headers  ${JSON.stringify(redactAuth(raw))}`);
+        say(`  ↑ 字符串（YAML）  "Bearer " 前缀：${/Bearer\s/.test(raw) ? '有' : '**没有 ← 问题在这**'}`);
+    } else if (raw && typeof raw === 'object') {
+        const shown = { ...raw };
+        if (shown.Authorization !== undefined) shown.Authorization = redactAuth(shown.Authorization);
+        say(`custom_include_headers  ${JSON.stringify(shown)}`);
+        say(`  ↑ 对象  "Bearer " 前缀：${/Bearer\s/.test(String(raw.Authorization ?? '')) ? '有' : '**没有 ← 问题在这**'}`);
+    } else {
+        say('custom_include_headers  (没有) **← 问题在这**');
+    }
+    say('');
 }
 
 /**
@@ -1038,7 +1071,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.14'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.15'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1106,6 +1139,10 @@ export async function probeExact(settings) {
 
     const exact = await sendAndReport(context, body, say, out);
 
+    // 把**实际操作数**打出来 —— 前面反复绕的原因就是只看结论、不看送出去的东西
+    // 到底长什么样。
+    describeKeyFields(body, say);
+
     // 自证：把判断依据打出来。
     // 这里出过一次事故 —— 输出里既有「✘ 上游/酒馆报错」又走了「通过」分支，
     // 而我只能靠比对文案去猜用户装的是哪一版。打出来就不必猜。
@@ -1124,7 +1161,14 @@ export async function probeExact(settings) {
     }
 
     say('=== 复现成功，继续二分 ===');
-    say('每次只改一处，看哪个字段是触发点。');
+    // 输出太长时，可以用面板里的「复制结果」按钮，或者只跑一个变体：
+    // 在诊断输出框里能看到全部；想精简就看 hash，例如打开 #awOnly=1
+    let only = null;
+    try {
+        const m = /awOnly=(\d+)/.exec(globalThis.location?.hash ?? '');
+        if (m) only = Number(m[1]);
+    } catch { /* 无所谓 */ }
+    say(only ? `只跑变体 ${only}（URL 带了 #awOnly=${only}）` : '每次只改一处，看哪个字段是触发点。');
     say('');
 
     const variants = [
@@ -1150,6 +1194,7 @@ export async function probeExact(settings) {
 
     let found = null;
     for (const [label, mutate] of variants) {
+        if (only !== null && !label.startsWith(String(only))) continue;
         const v = JSON.parse(JSON.stringify(body));
         mutate(v);
         say(`--- ${label}`);
