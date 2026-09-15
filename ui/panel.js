@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.4.1';
+import { demoState } from '../state.js?v=0.4.2';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -95,6 +95,11 @@ function stageFieldsHTML(stage, settings) {
             <span>空正文时自动重试</span>
             <em class="aw-tip">拿到空正文时换另一种模式再试一次</em>
         </label>
+
+        <label class="aw-field">
+            <span>停止字段名（上游专有，留空 = 不发）</span>
+            <input type="text" id="${id('abortflag')}" value="${esc(s.abortFlag ?? '')}" placeholder="例如 abort">
+        </label>
     `;
 }
 
@@ -109,6 +114,7 @@ function readStage(el, stage, current) {
     next.maxTokens = parseInt(get('maxtokens')?.value, 10) || current.maxTokens;
     next.useStream = !!get('stream')?.checked;
     next.autoRetryOnEmpty = !!get('autoretry')?.checked;
+    next.abortFlag = (get('abortflag')?.value ?? '').trim();
 
     if (stage === 'critic') {
         next.contextDepth = parseInt(get('depth')?.value, 10) || 0;
@@ -436,6 +442,9 @@ function bindEvents(el) {
     el.querySelector('#aw-diag-secret')?.addEventListener('click', () => {
         window.awProbeSecret?.();
     });
+    el.querySelector('#aw-diag-requests')?.addEventListener('click', () => {
+        window.awLastRequests?.();
+    });
     el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
         const model = el.querySelector('#aw-diag-model')?.value ?? '';
         window.awProbeShape?.(model);
@@ -521,6 +530,7 @@ export function showPanel() {
     }
     applyLayout();
     panel.style.display = 'flex';
+    mountOptions.onBeforeShow?.();
 }
 
 export function hidePanel() {
@@ -554,6 +564,30 @@ function ensurePanelReady() {
         }
     }
     return true;
+}
+
+/**
+ * 用当前持久化配置刷新面板上的提示词。
+ *
+ * 面板里的提示词必须是配置里的那一份 —— 否则界面显示的和后台实际发送的会对不上，
+ * 而且用户根本没法判断哪一份在生效。
+ *
+ * 正在编辑的框不覆盖：不打断输入。
+ */
+export function refreshPrompts(settings) {
+    if (!panel || !settings) return;
+
+    const critic = panel.querySelector('#aw-critic-prompt');
+    if (critic && document.activeElement !== critic) {
+        const next = settings.critic?.systemPrompt ?? '';
+        if (critic.value !== next) critic.value = next;
+    }
+
+    const rewrite = panel.querySelector('#aw-rewrite-prompt');
+    if (rewrite && document.activeElement !== rewrite) {
+        const next = settings.final?.systemPrompt ?? '';
+        if (rewrite.value !== next) rewrite.value = next;
+    }
 }
 
 export function isPanelOpen() {
@@ -674,6 +708,7 @@ const PANEL_HTML = `
                     <button id="aw-diag-probe" class="aw-btn">测试当前连接配置</button>
                     <button id="aw-diag-secret" class="aw-btn">密钥来源对照</button>
                     <button id="aw-diag-copy" class="aw-btn">复制结果</button>
+                    <button id="aw-diag-requests" class="aw-btn">查看实际请求体</button>
                 </div>
                 <label class="aw-field">
                     <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>

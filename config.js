@@ -27,9 +27,15 @@ export const DEFAULT_CRITIC_PROMPT = `你现在是幕后校验者。你的唯一
 6. 是否遗漏用户本轮明确要求的关键内容。
 7. 是否出现明显剧情逻辑错误。
 
-【输出】
-按给定的 JSON 结构输出。没问题时 issues 为空数组、verdict 为「无需修改」。
-evidence 必须引用草稿原文片段，fix 要给出具体改法。`;
+【输出格式】
+每条问题一行，编号，写清三件事：问题类型、草稿里的原句、应该怎么改。
+例：
+1. [信息越界] 原句「她早就知道那个秘密」—— 该信息此时尚未揭示，删去这句。
+2. [时间线] 原句「昨夜下过雨」—— 与前文晴天冲突，改为「午后」。
+
+严格控制篇幅：最多 8 条，总长不超过 600 字。
+全部使用纯文本，不要输出任何嵌套结构或对象。
+没有问题时只输出四个字：无需修改。`;
 
 /** 改写阶段默认提示词 */
 export const DEFAULT_REWRITE_PROMPT = `你是小说改写器。你的唯一任务是按修改意见修改草稿。
@@ -91,6 +97,12 @@ function stageDefaults(overrides) {
         useStream: true,
         /** 拿到空正文时是否自动重试一次流式 */
         autoRetryOnEmpty: true,
+        /**
+         * 上游专有的「停止生成」字段名（留空 = 不发）。
+         * 酒馆中止上游主要靠关闭连接，但有些上游还认显式的请求体字段。
+         */
+        abortFlag: '',
+        abortFlagOnStop: true,
         /** 校验阶段可见的聊天楼层数 */
         contextDepth: 6,
         includeCharCard: true,

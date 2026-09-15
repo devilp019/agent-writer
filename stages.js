@@ -8,7 +8,7 @@
  * 校验者只需要：指令 + 角色卡摘要 + 最近几楼 + 草稿。
  */
 
-import { CRITIQUE_SCHEMA } from './config.js?v=0.4.1';
+import { CRITIQUE_SCHEMA } from './config.js?v=0.4.2';
 
 /** 把校验 schema 渲染成提示词里的文字说明，让模型知道要输出什么 */
 export function describeSchema() {
@@ -90,6 +90,9 @@ export function buildCriticMessages({ settings, draft, draftIndex, ctx }) {
 
     // 输出格式写进提示词本身，而不是依赖上游支持 response_format。
     // 草稿只出现一次 —— 历史里已经排除了草稿所在楼层。
+    //
+    // 关于格式：不强制 JSON。之前的 `[Object]` 问题是模型把嵌套对象直接拼进
+    // 正文导致的，只要顶层保持扁平就不会有这个问题。所以只要求纯文本清单。
     messages.push({
         role: 'user',
         content: [
@@ -97,12 +100,10 @@ export function buildCriticMessages({ settings, draft, draftIndex, ctx }) {
             draft,
             '',
             '【输出要求】',
-            '只输出一个 JSON 对象，不要有任何解释文字、不要用 markdown 代码块包裹。',
-            '结构如下：',
-            describeSchema(),
-            '',
-            '限定：issues 最多 8 条，每条 evidence 不超过 60 字、fix 不超过 80 字。',
-            '没有问题就输出 {"verdict":"无需修改","issues":[]}。',
+            '每条问题一行，编号，依次写：问题类型、草稿里的原句、应该怎么改。',
+            '全部使用纯文本。不要输出任何嵌套结构、对象、或 JSON。',
+            '最多 8 条，总长不超过 600 字。',
+            '没有问题就只输出：无需修改',
         ].join('\n'),
     });
 
@@ -180,27 +181,52 @@ export function parseCritique(text) {
     return null;
 }
 
-/** 校验结果是否表示「不用改」 */
-export function isClean(parsed) {
-    if (!parsed) return false;
-    const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
-    return issues.length === 0 || parsed.verdict === '无需修改';
+/** 从纯文本里粗判是否有问题 */
+export function looksCleanText(text) {
+    const raw = String(text ?? '').trim();
+    if (!raw) return false;
+    // 「无需修改」这类回话通常很短，不会夹带别的内容
+    if (raw.length > 60) return false;
+    return /无需修改|没有问题|无问题|不用修改|no\s*issues?/i.test(raw);
+}
+
+/**
+ * 校验结果是否表示「不用改」。
+ *
+ * 支持两种形态：结构化（issues 为空 / verdict 无需修改）和纯文本（"无需修改"）。
+ * 默认提示词走的是纯文本，所以后者才是主路径。
+ */
+export function isClean(parsed, rawText = '') {
+    if (parsed) {
+        const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
+        if (parsed.verdict === '无需修改') return true;
+        if (issues.length === 0) return true;
+    }
+    return looksCleanText(rawText);
 }
 
 /**
  * 校验输出是否明显跑飞了。
  *
- * 为什么需要这道闸：如果校验阶段自由发挥出一大段文字（schema 没生效），
- * 后面会把这段垃圾当「修改意见」喂给改写者，终稿就等于草稿甚至更糟 ——
- * 而且整个过程看起来是「成功」的。宁可中止并保留原稿，也不拿垃圾去改写。
+ * 注意：这里**不要求校验者输出 JSON**。
+ * 要求结构化输出的唯一理由是原来的 `[Object]` 问题 —— 模型把嵌套对象
+ * 直接拼进了正文，酒馆渲染时就变成一堆没意义的 `[Object]`。
+ * 所以输出保持扁平即可，不必强制 JSON。
+ *
+ * 真正要拦的是「跑飞」：解析不出结构、条数离谱、或总字数失控。
+ * 那段垃圾一旦被当成「修改意见」喂给改写者，终稿就等于草稿甚至更糟 ——
+ * 而且整个过程看起来是「成功」的。
  */
 export function looksRunaway(text, parsed, { maxChars = 6000, maxIssues = 40 } = {}) {
     const raw = String(text ?? '').trim();
 
+    if (!raw) return '校验输出为空';
+
+    // 解析不出结构也可以接受 —— 但只要长到失控就一定是跑飞了
     if (!parsed) {
         return raw.length > maxChars
-            ? `校验输出不是可解析的 JSON，且有 ${raw.length} 字（上限 ${maxChars}）`
-            : '校验输出不是可解析的 JSON';
+            ? `校验输出无法解析为结构化结果，且有 ${raw.length} 字（上限 ${maxChars}）`
+            : null;
     }
 
     const issues = Array.isArray(parsed.issues) ? parsed.issues : [];

@@ -25,7 +25,7 @@ import {
     isClean,
     looksRunaway,
     CRITIQUE_SCHEMA,
-} from './stages.js?v=0.4.1';
+} from './stages.js?v=0.4.2';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -77,18 +77,36 @@ function buildRequestArgs(settings, messages, signal) {
             includeInstruct: true,
         },
         overridePayload,
+        /**
+         * 上游专有的「停止生成」字段。
+         *
+         * 酒馆中止上游靠的是浏览器连接关闭；有些上游还会认一个显式的
+         * 请求体字段（例如 Cline 的 abort）。名字各家用得不一样，所以做成可配置。
+         */
+        abortFlag: String(settings.abortFlag ?? '').trim(),
         maxTokens: Number(settings.maxTokens) || 2048,
         messages,
     };
 }
 
 /** 消费流式迭代器，边收边回调 */
-async function consumeStream(streamFn, onProgress) {
+async function consumeStream(streamFn, onProgress, signal) {
     let text = '';
     let reasoning = '';
     let chunks = 0;
 
-    for await (const chunk of streamFn()) {
+    const iterator = streamFn();
+
+    for await (const chunk of iterator) {
+        if (signal?.aborted) {
+            try {
+                await iterator.return?.();
+            } catch { /* 迭代器可能已经结束 */ }
+            const err = new Error('user abort');
+            err.name = 'AbortError';
+            throw err;
+        }
+
         text = chunk?.text ?? text;
         reasoning = chunk?.state?.reasoning ?? reasoning;
         chunks++;
@@ -96,6 +114,38 @@ async function consumeStream(streamFn, onProgress) {
     }
 
     return { text, reasoning, chunks };
+}
+
+/**
+ * 把外部的 AbortSignal 和内部控制器的信号合并。
+ *
+ * 为什么需要内部控制器：酒馆后端是靠「浏览器连接关闭」来中止上游请求的
+ * （request.socket.on('close', () => controller.abort())）。
+ * 而流式迭代器被 break 掉只是不再读，**不会关闭 fetch 的 body reader**，
+ * 连接还挂着 —— 结果就是前台停了、后台模型还在继续生成。
+ * 所以必须让 fetch 拿到一个真的会被 abort 的 signal。
+ */
+function mergeSignals(external, internal) {
+    if (!external) return internal.signal;
+    if (external.aborted) {
+        internal.abort();
+        return internal.signal;
+    }
+    external.addEventListener('abort', () => internal.abort(), { once: true });
+    return internal.signal;
+}
+
+/**
+ * 最近一次各阶段实际发出的请求体。
+ * 用于排查「参数到底有没有发出去」——诊断面板会读它。
+ */
+const lastRequests = { critic: null, final: null };
+
+export function getLastRequests() {
+    return {
+        critic: lastRequests.critic ? JSON.parse(JSON.stringify(lastRequests.critic)) : null,
+        final: lastRequests.final ? JSON.parse(JSON.stringify(lastRequests.final)) : null,
+    };
 }
 
 /**
@@ -116,15 +166,34 @@ export async function runStage(stage, settings, messages, options = {}) {
 
     const args = buildRequestArgs(settings, messages, signal);
 
+    // 每一次尝试用一个新的内部控制器，合并外部信号
     const attempt = async (useStream) => {
+        const internal = new AbortController();
+        const effectiveSignal = mergeSignals(signal, internal);
+
         // 顶层字段混进请求体，而不是塞进 overridePayload
         const requestData = { ...(topLevelPayload ?? {}) };
+        if (args.abortFlag) requestData[args.abortFlag] = false;
+
+        // 把真正要发出去的东西记下来。
+        // 「附加参数没发出去」这类问题，光看代码定位不了 ——
+        // 必须看到合并后的请求体，以及 sendRequest 实际收到了什么。
+        const merged = { ...requestData, ...args.overridePayload };
+        lastRequests[stage] = {
+            profileId: args.profileId,
+            stream: useStream,
+            overridePayload: args.overridePayload,
+            requestData,
+            merged,
+            abortFlag: args.abortFlag,
+        };
+        console.log(`[AgentWriter] ${stage} 发出的请求体 →`, merged);
 
         const result = await service.sendRequest(
             args.profileId,
             args.messages,
             args.maxTokens,
-            { ...args.options, stream: useStream },
+            { ...args.options, stream: useStream, signal: effectiveSignal },
             args.overridePayload,
             requestData,
         );
@@ -133,8 +202,13 @@ export async function runStage(stage, settings, messages, options = {}) {
             if (typeof result !== 'function') {
                 return { content: '', reasoning: '', mode: 'stream' };
             }
-            const { text, reasoning } = await consumeStream(result, onProgress);
-            return { content: text, reasoning, mode: 'stream' };
+            try {
+                const { text, reasoning } = await consumeStream(result, onProgress, effectiveSignal);
+                return { content: text, reasoning, mode: 'stream' };
+            } finally {
+                // 无论如何都要断开连接，让酒馆后端收到 close 并中止上游
+                if (!internal.signal.aborted) internal.abort();
+            }
         }
 
         return {
@@ -249,7 +323,7 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
     }
 
     // ---------- 无需修改就跳过 ③ ----------
-    if (isClean(parsed)) {
+    if (isClean(parsed, critiqueText)) {
         report('final', { phase: 'skipped', reason: '校验判定无需修改' });
         return {
             ok: true,
@@ -262,7 +336,8 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
     }
 
     // ---------- ③ 改写 ----------
-    const critiqueForRewrite = renderCritique(parsed);
+    // 结构化输出就用渲染后的清单，纯文本就直接用原文
+    const critiqueForRewrite = parsed ? renderCritique(parsed) : critiqueText;
     report('final', { phase: 'start' });
 
     const rewriteMessages = buildRewriteMessages({

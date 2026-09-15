@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.4.1';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.4.1';
-import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.4.1';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.4.2';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.4.2';
+import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.4.2';
 import {
     mountPanel,
     unmountPanel,
@@ -26,10 +26,11 @@ import {
     writeOutput,
     clearOutputs,
     setRunning as setPanelRunning,
-} from './ui/panel.js?v=0.4.1';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.4.1';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.4.1';
-import { runPipeline, findLastAssistantIndex, extractReasoning } from './pipeline.js?v=0.4.1';
+    refreshPrompts,
+} from './ui/panel.js?v=0.4.2';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.4.2';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.4.2';
+import { runPipeline, findLastAssistantIndex, extractReasoning } from './pipeline.js?v=0.4.2';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -260,9 +261,14 @@ function bindGenerationHooks() {
     eventSource.on(eventTypes.GENERATION_STARTED, (type, _option, dryRun) => {
         lastGenerationType = type;
         const settings = getSettings();
-        if (!settings.auto || dryRun) return;
-        if (type === 'continue' || type === 'quiet') return;
-        if (runner) return;
+
+        // 每个可能导致跳过的情况都留下日志 —— 平板开不了控制台，
+        // 「自动没用」这种问题只能靠日志区分是哪一环没满足条件。
+        if (dryRun) { log(`[触发] 跳过：dryRun（type=${type}）`); return; }
+        if (!settings.auto) { log(`[触发] 跳过：自动模式未开启（type=${type}）`); return; }
+        if (type === 'continue') { log('[触发] 跳过：continue'); return; }
+        if (type === 'quiet') { log('[触发] 跳过：quiet'); return; }
+        if (runner) { log('[触发] 跳过：流水线正在运行'); return; }
 
         const { chat, draft } = describeChat();
         preGenSnapshot = { chatLen: chat.length, lastAssistantMes: findLastAssistantIndex(chat) >= 0 ? draft : null };
@@ -273,6 +279,8 @@ function bindGenerationHooks() {
 
     eventSource.on(eventTypes.GENERATION_ENDED, () => {
         const settings = getSettings();
+        log(`[触发] GENERATION_ENDED type=${lastGenerationType} 自动=${settings.auto} pending=${pendingRewrite} 运行中=${!!runner}`);
+
         if (!settings.auto) return;
         if (lastGenerationType === 'quiet') return;
         if (!pendingRewrite) return;
@@ -282,10 +290,11 @@ function bindGenerationHooks() {
         // 等酒馆把楼层渲染完再动它
         setTimeout(() => {
             if (!hasNewContent()) {
-                log('本次生成没有产生新内容，跳过流水线');
+                log('[触发] 本次生成没有产生新内容，跳过');
                 setState(idleState(getSettings()));
                 return;
             }
+            log('[触发] 条件满足，启动流水线');
             runPipelineNow('自动');
         }, 500);
     });
@@ -419,6 +428,10 @@ function mountPanelOnce() {
                 if (critic) critic.value = DEFAULT_CRITIC_PROMPT;
                 if (rewrite) rewrite.value = DEFAULT_REWRITE_PROMPT;
                 log('已恢复默认提示词');
+            },
+            onBeforeShow: () => {
+                // 面板显示的提示词必须就是配置里那一份
+                refreshPrompts(getSettings());
             },
             onTabChange: (tab) => {
                 const s = getSettings();
