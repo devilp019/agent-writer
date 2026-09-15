@@ -9,7 +9,7 @@
  * 但会记日志，并且菜单重建后能自动补挂。
  */
 
-import { subscribe, isBusy } from '../state.js?v=0.8.13';
+import { subscribe, isBusy } from '../state.js?v=0.8.14';
 
 const ITEM_ID = 'aw-menu-item';
 

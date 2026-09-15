@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.13';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.13';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.14';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.14';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.13');
+        const mod = await import('./pipeline.js?v=0.8.14');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.13 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.14 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.13');
+        const mod = await import('./tavern.js?v=0.8.14');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.13 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.14 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1038,7 +1038,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.13'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.14'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1066,12 +1066,14 @@ export async function probeExact(settings) {
     say(`附加字段     ${Object.keys(bodyFields).length ? JSON.stringify(bodyFields) : '{}（空）'}`);
 
     // 原始文本也打出来 —— 只有它能区分「没填」和「填了但 JSON 解析失败」。
-    // 实测踩到过：用户明明填了，诊断里却显示空，当时无法判断是哪一种。
+    // 而且现在原文是**照发**的（走 custom_include_body），所以它比解析后的
+    // 对象更能代表真正发出去的东西。
     const rawFields = stage.bodyFieldsRaw;
     if (typeof rawFields === 'string') {
         say(`附加字段原文 ${JSON.stringify(rawFields.slice(0, 200))}`);
         if (rawFields.trim() && rawFields.trim() !== '{}' && Object.keys(bodyFields).length === 0) {
-            say('  ⚠ 原文有内容但没解析成对象 ⇒ JSON 写坏了，这一项被忽略了');
+            say('  ℹ 原文不是严格 JSON ⇒ 会被原样发给上游（这是想要的效果：');
+            say('     严格 JSON 会被酒馆解析后丢掉它不认识的字段，例如 providerOptions）');
         }
     }
     say('');
@@ -1090,8 +1092,10 @@ export async function probeExact(settings) {
         chat_completion_source: 'custom',
         custom_url: customApi.apiurl,
         use_sysprompt: false,
-        ...bodyFields,
     };
+    // 附加字段已经在 customApi.custom_include_body 里（buildCustomApi 放的原文），
+    // 所以这里**不能**再 spread bodyFields —— 那会把解析后的对象又塞回顶层，
+    // 而酒馆会严格解析并丢掉不认识的字段，正好和用户要的效果相反。
     delete body.apiurl;
     // key 已经在 custom_include_headers 里了，这里绝不能带 —— 带了就退回旧做法
     delete body.key;

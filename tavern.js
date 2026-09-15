@@ -428,22 +428,27 @@ export function normalizeChatCompletionsUrl(rawUrl) {
  * version of Cline and re-authenticate」。这句话把人引向「去重装 Cline」，
  * 但它对应好几种完全不同的原因：
  *
- *   1. **酒馆转发时送的凭据不对**（实测最终就是这个）——
- *      custom_api.key 会被 TavernHelper 写进 proxy_password（对 custom 源无效）
- *      和一份它自己拼的 Authorization 头，而那份头上游不认。
- *      改用顶层 custom_include_headers 后 200。见 buildCustomApi 的注释。
+ *   1. **Authorization 头没带 `Bearer ` 前缀**（实测最终就是这个）——
+ *      酒馆后端把 custom_include_headers 的值原样当请求头发出去，不补前缀。
+ *      二分结果（同 key、同 body，只改这一个值）：
+ *        裸 key          → HTTP 400 Unauthorized
+ *        "Bearer sk_..." → HTTP 200
  *
- *   2. 拿错了凭据类型 —— Cline 有两种 token：
+ *   2. `custom_api.key` 那条旧路送出去的凭据上游不认。
+ *      改用顶层 custom_include_headers。见 buildCustomApi 的注释。
+ *
+ *   3. 拿错了凭据类型 —— Cline 有两种 token：
  *        · API key：app.cline.bot 的 Settings > API Keys 里生成，给脚本用
  *        · 账号 auth token：登录插件/CLI 时自动生成，只给官方客户端用
  *
- *   3. 额度用尽 —— 撞到额度上限时 Cline 返回的**不是 429**，而是这个 401。
+ *   4. 额度用尽 —— 撞到额度上限时 Cline 返回的**不是 429**，而是这个 401。
  *
- *   4. key 被撤销/失效。
+ *   5. key 被撤销/失效。
  *
- * ⚠️ 别看到 401 就归因于额度。曾经因为「同一个 key 前一刻全 200、后一刻全 401」
- * 就断定是额度，那是拿时间相邻当因果 —— 后来同一个 key 在直连探针里始终 200、
- * 在扩展里始终 401，与额度无关。
+ * ⚠️ 别看到 401 就归因于额度或凭据类型。这里绕过两个弯：
+ *   · 曾经因为「同一个 key 前一刻全 200、后一刻全 401」就断定是额度 ——
+ *     那是拿时间相邻当因果，后来同一个 key 直连始终 200，与额度无关。
+ *   · 曾经以为裸 key 就够了，还担心加前缀会变成双前缀 —— 反了，见第 1 条。
  *
  * 所以提示里先教人**怎么把上游的问题和转发的问题分开**（跑直连探针），
  * 而不是直接给一个原因。
@@ -545,7 +550,40 @@ export function buildCustomApi(stage = {}) {
         // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
         customApi.source = 'custom';
         if (apiKey) {
-            customApi.custom_include_headers = { Authorization: apiKey };
+            // 值必须带 `Bearer ` 前缀，且**不能**只放裸 key。
+            //
+            // 这是实测出来的：酒馆后端把 custom_include_headers 的值**原样**
+            // 当作 Authorization 头发出去，不会自己补前缀。
+            // 二分结果（同一个 key、同一个 body，只改这一个值）：
+            //   裸 key                        → HTTP 400 Unauthorized
+            //   "Bearer sk_..."               → HTTP 200
+            //
+            // 我一度把前缀去掉了，理由是「TavernHelper 会自己拼成 Bearer ${key}，
+            // 加了会变双前缀」——那个担心是多余的：会自己拼前缀的是它内部
+            // overrideCustomAuthorizationHeader，只作用于 custom_api.key 那条旧路；
+            // 我们自己给 custom_include_headers 时它是整体替换，不会再加一次。
+            customApi.custom_include_headers = { Authorization: `Bearer ${apiKey}` };
+        }
+
+        // 附加请求体字段走 custom_include_body，**用面板里的原文**。
+        //
+        // 为什么不走事件注入（Object.assign 到 generate_data 顶层）：
+        // 酒馆后端会对请求体做严格 JSON 解析，**把它不认识的字段丢掉**。
+        // 实测 Cline 的 providerOptions 就是这么被丢的（它只影响路由精准度，
+        // 不会导致失败，但用户要它就得保住）。
+        //
+        // custom_include_body 不会被那样解析 —— 而且这里刻意送「原文」而不是
+        // 序列化后的 JSON：用户如果把 JSON 写得**不严格**（比如带尾逗号），
+        // 酒馆解析失败就会原样发给上游，字段一个不丢。
+        // 这个办法是用户在织幕里用出来的，这里照搬。
+        //
+        // 代价：没有 schema 保护，写坏了就是发坏了 —— 但那正是用户想要的行为。
+        const rawFields = String(stage.bodyFieldsRaw ?? '').trim();
+        if (rawFields && rawFields !== '{}') {
+            customApi.custom_include_body = rawFields;
+        } else if (Object.keys(stage.bodyFields ?? {}).length > 0) {
+            // 没有原文（例如程序直接构造的设置）时退回严格 JSON
+            customApi.custom_include_body = JSON.stringify(stage.bodyFields);
         }
     } else if (stage.proxyPreset) {
         customApi.proxy_preset = String(stage.proxyPreset).trim();
