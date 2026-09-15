@@ -208,6 +208,9 @@ function bindEvents(el) {
     el.querySelector('#aw-diag-probe')?.addEventListener('click', () => {
         window.awProbe?.();
     });
+    el.querySelector('#aw-diag-secret')?.addEventListener('click', () => {
+        window.awProbeSecret?.();
+    });
     el.querySelector('#aw-diag-copy')?.addEventListener('click', async () => {
         const output = el.querySelector('#aw-diag-output');
         if (!output?.value) return;
@@ -365,6 +368,7 @@ const PANEL_HTML = `
                 <div class="aw-row">
                     <button id="aw-diag-run" class="aw-btn aw-btn-primary">运行自检</button>
                     <button id="aw-diag-probe" class="aw-btn">测试当前连接配置</button>
+                    <button id="aw-diag-secret" class="aw-btn">密钥来源对照</button>
                     <button id="aw-diag-copy" class="aw-btn">复制结果</button>
                 </div>
                 <textarea id="aw-diag-output" readonly rows="10" placeholder="尚未运行"></textarea>

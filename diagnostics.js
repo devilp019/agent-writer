@@ -327,8 +327,154 @@ export async function probe(profileId) {
     return text;
 }
 
+function getKnownProfiles(context) {
+    try {
+        return context.ConnectionManagerRequestService.getSupportedProfiles?.() ?? [];
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * 针对「酒馆里手动测能通、程序调返回 error」这种情况的定向诊断。
+ *
+ * 最可能的差别是密钥来源：酒馆界面上直接用当前激活的密钥，
+ * 而 ConnectionManagerRequestService 用的是存在 profile 里的 secret id，
+ * 这两个可以是不同的（profile 里那个可能过期或属于另一个账号）。
+ *
+ * 所以把所有候选 secret 排列组合都试一遍，外加换模型对照。
+ */
+export async function probeSecret() {
+    const context = ctx();
+    const svc = context?.ConnectionManagerRequestService;
+    if (!svc) {
+        setDiagOutput('ConnectionManagerRequestService 不可用。');
+        return null;
+    }
+
+    const profileId = getDiagProfileId(context);
+    let profile;
+    try {
+        profile = svc.getProfile(profileId);
+    } catch (e) {
+        setDiagOutput(`取连接配置失败: ${e?.message}`);
+        return null;
+    }
+
+    const apiMap = context.CONNECT_API_MAP?.[profile.api] ?? {};
+    const out = [];
+    const say = (s) => {
+        out.push(s);
+        setDiagOutput(out.join('\n'));
+    };
+
+    say('=== 密钥来源对照测试 ===');
+    say(`配置「${profile.name}」  model=${profile.model || '(空)'}`);
+    say('');
+
+    const variants = [
+        { label: '① 用 profile 里存的 secret', secret_id: profile['secret-id'] },
+        { label: '② 不带 secret（酒馆用当前激活的密钥）', secret_id: undefined },
+    ];
+
+    // 把该配置自己声明的密钥也加进来对照
+    try {
+        const raw = context.extensionSettings?.connectionManager?.profiles
+            ?.find((p) => p.id === profileId)?.secret;
+        if (raw) variants.push({ label: `③ 用 profile.secret=${raw}`, secret_id: raw });
+    } catch { /* 没有就算了 */ }
+
+    // 同时也看看当前激活的是哪个
+    try {
+        const active = context.ChatCompletionSettings?.secret_id
+            ?? context.chatCompletionSettings?.secret_id;
+        if (active) say(`当前酒馆界面激活的 secret: ${active}`);
+        say('');
+    } catch { /* 读不到就算了 */ }
+
+    const messages = [{ role: 'user', content: 'Say OK' }];
+
+    for (const v of variants) {
+        const body = {
+            stream: false,
+            messages,
+            model: profile.model,
+            chat_completion_source: apiMap.source ?? 'custom',
+            custom_url: profile['api-url'],
+            max_tokens: 8,
+            use_sysprompt: true,
+        };
+        if (v.secret_id) body.secret_id = v.secret_id;
+
+        say(`${v.label}`);
+        try {
+            const resp = await fetch('/api/backends/chat-completions/generate', {
+                method: 'POST',
+                headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const text = await resp.text();
+            let parsed = null;
+            try { parsed = JSON.parse(text); } catch { /* 非 JSON */ }
+
+            const err = parsed?.error;
+            if (err) {
+                say(`   ✘ HTTP ${resp.status}  上游报错: ${err.message ?? JSON.stringify(err)}`);
+            } else {
+                const content = parsed?.choices?.[0]?.message?.content
+                    ?? parsed?.choices?.[0]?.text
+                    ?? parsed?.content
+                    ?? '';
+                say(`   ✔ HTTP ${resp.status}  返回: ${JSON.stringify(String(content).slice(0, 80))}`);
+                say('   ⇒ 这条密钥来源是通的');
+            }
+        } catch (e) {
+            say(`   抛错: ${e?.message}`);
+        }
+        say('');
+    }
+
+    // 换模型对照：区分「密钥问题」和「这个模型在该账号下不可用」
+    if (profile.model) {
+        say('=== 换模型对照（同一个密钥，只改 model）===');
+        const body = {
+            stream: false,
+            messages,
+            model: 'gpt-4o-mini',
+            chat_completion_source: apiMap.source ?? 'custom',
+            custom_url: profile['api-url'],
+            max_tokens: 8,
+            use_sysprompt: true,
+        };
+        if (profile['secret-id']) body.secret_id = profile['secret-id'];
+        try {
+            const resp = await fetch('/api/backends/chat-completions/generate', {
+                method: 'POST',
+                headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const parsed = await resp.json().catch(() => null);
+            if (parsed?.error) {
+                say(`   model=gpt-4o-mini → ✘ ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
+                say('   ⇒ 换模型也不行，问题在密钥/端点而不在模型名');
+            } else {
+                say('   model=gpt-4o-mini → ✔ 通');
+                say(`   ⇒ 端点与密钥没问题，是「${profile.model}」这个模型名在该账号下不可用`);
+            }
+        } catch (e) {
+            say(`   抛错: ${e?.message}`);
+        }
+    }
+
+    say('');
+    say('判断方法：同密钥换模型能通 ⇒ 模型名的问题；两条密钥都报错 ⇒ 端点或密钥本身的问题。');
+    log('密钥来源对照测试完成');
+    return out.join('\n');
+}
+
 /** 挂到 window，方便不开面板直接调用 */
 export function exposeGlobals() {
     globalThis.awDiagnose = diagnose;
     globalThis.awProbe = probe;
+    globalThis.awProbeSecret = probeSecret;
 }
