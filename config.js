@@ -85,63 +85,50 @@ export const CRITIQUE_SCHEMA = {
 
 function stageDefaults(overrides) {
     return {
-        /** 引用哪个酒馆连接配置；空 = 用当前连接 */
-        profileId: '',
-        /** 覆盖配置里的模型；空 = 不覆盖 */
+        /**
+         * 预设里作为注入槽位的条目名。
+         *
+         * 这个条目由你在酒馆的预设编辑器里手工新建，位置也由你定 ——
+         * 因为「指令放在哪、以什么身份出现」直接决定模型会不会被预设里
+         * 更靠后的强提示词（例如推进剧情）带跑。
+         */
+        slotName: '',
+
+        /** 引用哪个酒馆代理预设来换渠道；空 = 用当前连接 */
+        proxyPreset: '',
+        /** 覆盖模型名；空 = 不覆盖 */
         model: '',
-        /** 追加到请求体，用来开关思考等 provider 私有参数 */
-        overridePayload: {},
+
+        /**
+         * 直接附加到请求体顶层的字段（provider 私有参数，例如思考开关）。
+         * 通过 CHAT_COMPLETION_SETTINGS_READY 事件注入，不走 custom_include_body
+         * —— 后者要过一遍 YAML 序列化，嵌套对象容易出问题。
+         */
+        bodyFields: {},
+
         temperature: 1.0,
         maxTokens: 2048,
-        /** 默认走流式：部分上游（实测 Cline）的非流式包裹格式酒馆解析不了 */
         useStream: true,
-        /** 拿到空正文时是否自动重试一次流式 */
-        autoRetryOnEmpty: true,
-        /**
-         * 上游专有的「停止生成」字段名（留空 = 不发）。
-         * 酒馆中止上游主要靠关闭连接，但有些上游还认显式的请求体字段。
-         */
-        abortFlag: '',
-        abortFlagOnStop: true,
-        /** 校验阶段可见的聊天楼层数 */
-        contextDepth: 6,
-        includeCharCard: true,
-        /** 是否注入世界书已激活的条目（校验「违反设定」必须有它） */
-        includeWorldInfo: true,
         ...overrides,
     };
 }
 
 export const DEFAULT_SETTINGS = Object.freeze({
-    version: 2,
+    version: 3,
     auto: false,
     /** 总开关，关掉后悬浮球显示停用态 */
     enabled: true,
 
     critic: stageDefaults({
+        slotName: 'AW-校验',
         temperature: 0.3,
-        useStream: true,
-        /**
-         * 默认关闭。
-         *
-         * 打开后会把 CRITIQUE_SCHEMA 作为请求体顶层 json_schema 发出去，
-         * 酒馆会转成 OpenAI 的 response_format —— 但自定义来源未必支持，
-         * 不支持时上游会报错或忽略，反而更糟。
-         * 默认靠提示词里写明的 JSON 结构约束输出，配合解析容错，通用性更好。
-         */
-        useJsonSchema: false,
         systemPrompt: DEFAULT_CRITIC_PROMPT,
-        overridePayload: { thinking: { type: 'enabled' } },
     }),
 
     final: stageDefaults({
+        slotName: 'AW-改写',
         temperature: 1.0,
-        useStream: true,
-        autoRetryOnEmpty: true,
-        includeCharCard: true,
-        includeWorldInfo: true,
         systemPrompt: DEFAULT_REWRITE_PROMPT,
-        overridePayload: { thinking: { type: 'disabled' } },
     }),
 
     ui: {

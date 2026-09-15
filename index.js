@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.5.0';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.5.0';
-import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.5.0';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.6.0';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.6.0';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.6.0';
 import {
     mountPanel,
     unmountPanel,
@@ -27,10 +27,11 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.5.0';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.5.0';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.5.0';
-import { runPipeline, findLastAssistantIndex, extractReasoning } from './pipeline.js?v=0.5.0';
+} from './ui/panel.js?v=0.6.0';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.6.0';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.6.0';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.6.0';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.6.0';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -366,6 +367,8 @@ function startUI() {
         setState(idleState(settings));
         log(`Agent Writer v${VERSION} 就绪（悬浮球 ${fabOk ? '✔' : '✘'} / 菜单项 ${menuOk ? '✔' : '✘'}）`);
         bindGenerationHooks();
+        checkTavernHelper(settings);
+        recoverSlotsOnBoot(settings);
 
         // 两个都没成，说明环境本身有问题，别让用户对着空白界面猜
         if (!fabOk && !menuOk) {
@@ -373,6 +376,48 @@ function startUI() {
         }
     }
     return settings;
+}
+
+/**
+ * 检查酒馆助手是否可用。
+ *
+ * ②③ 走的是酒馆助手的 generate()，没它整个流水线都跑不了 ——
+ * 所以启动时就要说清楚，而不是等用户点了运行才报错。
+ */
+function checkTavernHelper(settings) {
+    const probe = probeTavernHelper();
+    if (!probe.ok) {
+        log(`✘ ${probe.missing.join('；')}`);
+        console.warn('[AgentWriter] 缺少酒馆助手，②③ 无法运行。请安装并启用 JS-Slash-Runner 扩展。');
+        return;
+    }
+
+    const presets = getProxyPresets();
+    log(`✓ 酒馆助手可用${probe.version ? `（v${probe.version}）` : ''}；代理预设 ${presets.length} 个`);
+
+    const missing = [];
+    if (!settings.critic.slotName) missing.push('② 校验');
+    if (!settings.final.slotName) missing.push('③ 改写');
+    if (missing.length) {
+        log(`⚠ ${missing.join(' / ')} 还没填注入槽位条目名，请到「参数」页设置`);
+    }
+}
+
+/**
+ * 启动时恢复槽位。
+ *
+ * 槽位注入是改用户预设的操作。万一上次没还原成功（刷新、崩溃、断电），
+ * 残留在槽位里的内容会被当成正常提示词发出去 —— 必须在启动时清掉。
+ */
+async function recoverSlotsOnBoot(settings) {
+    try {
+        const { recovered } = await recoverSlots([settings.critic.slotName, settings.final.slotName]);
+        if (recovered.length) {
+            log(`✓ 已还原上次未清理的槽位：${recovered.join('、')}`);
+        }
+    } catch (e) {
+        console.warn('[AgentWriter] 槽位恢复失败', e);
+    }
 }
 
 /**

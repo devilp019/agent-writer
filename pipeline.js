@@ -1,422 +1,41 @@
 /**
  * Agent Writer - 流水线
  *
- * ① 草稿：酒馆原生生成（不在这里）
- * ② 校验：独立连接配置，输出结构化问题清单
- * ③ 改写：独立连接配置，按清单改稿
+ * 三个阶段都用酒馆的完整组装：
  *
- * 两条实测得来的关键约束：
+ *   ① 草稿   酒馆原生生成（你按发送键那一次）
+ *   ② 校验   指令写进「校验槽位」→ TavernHelper.generate()
+ *   ③ 改写   指令写进「改写槽位」→ TavernHelper.generate()
  *
- * 1. 部分上游（Cline）的**非流式响应包裹格式酒馆解析不了** ——
- *    HTTP 200、请求成功，但 content 是空字符串。
- *    所以成功判据必须是「正文非空」，拿到空正文时自动换另一种模式重试。
+ * 为什么不用自己的请求组装：这三个阶段是同一个模型（只是 ② 换渠道开思考），
+ * 自己组装会让 ②③ 的提示词前缀和 ① 完全不同，前缀缓存必然失效。
  *
- * 2. `json_schema` 必须作为请求体的**顶层字段**传。
- *    酒馆只有看到顶层 json_schema 才会把它转成 response_format；
- *    塞进 custom_include_body 的话会被原样 merge 进请求体，
- *    上游收到一个它不认识的 json_schema 对象。
+ * 为什么注入的是预设槽位而不是历史末尾：末尾注入的指令盖不住预设里
+ * 更靠后的强提示词（例如推进剧情的），模型会跑偏去写剧情而不是做校验。
+ * 只有预设条目能控制指令的位置和身份。
+ *
+ * 槽位注入是**改用户预设**的操作，所以每一步都必须有还原，且在 finally 里；
+ * 扩展启动时还会做一次崩溃恢复（见 tavern.recoverSlots）。
  */
 
 import {
-    buildCriticMessages,
-    buildRewriteMessages,
-    renderCritique,
+    buildCritiqueInstruction,
+    buildRewriteInstruction,
     parseCritique,
     isClean,
     looksRunaway,
-    invalidatePrefixCache,
-    CRITIQUE_SCHEMA,
-} from './stages.js?v=0.5.0';
+} from './stages.js?v=0.6.0';
+import {
+    injectSlot,
+    restoreSlot,
+    tavernGenerate,
+    setPendingPayload,
+    clearPendingPayload,
+    recoverSlots,
+} from './tavern.js?v=0.6.0';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
-}
-
-function getService() {
-    const context = ctx();
-    const service = context?.ConnectionManagerRequestService ?? globalThis.ConnectionManagerRequestService;
-    if (!service) {
-        throw new Error('ConnectionManagerRequestService 不可用（检查酒馆的 connection-manager 扩展是否被禁用）');
-    }
-    return service;
-}
-
-/** 没有配置 profileId 时，退回当前选中的连接配置 */
-function currentProfileId() {
-    try {
-        return ctx()?.extensionSettings?.connectionManager?.selectedProfile ?? '';
-    } catch {
-        return '';
-    }
-}
-
-/**
- * 把阶段设置整理成发请求需要的东西。
- *
- * 拆成三块：
- *   - options          传给 sendRequest 的第 4 个参数
- *   - overridePayload  会被 merge 进请求体根字段
- *   - topLevelPayload  必须是 request.body 顶层才生效的字段（例如 json_schema）
- */
-function buildRequestArgs(settings, messages, signal) {
-    const profileId = settings.profileId || currentProfileId();
-    if (!profileId) {
-        throw new Error('没有可用的连接配置。请先在酒馆里建一个，或在面板里选一个。');
-    }
-
-    const overridePayload = { ...(settings.overridePayload ?? {}) };
-    if (settings.model) overridePayload.model = settings.model;
-    if (Number.isFinite(Number(settings.temperature))) overridePayload.temperature = Number(settings.temperature);
-
-    return {
-        profileId,
-        options: {
-            stream: !!settings.useStream,
-            signal: signal ?? null,
-            extractData: true,
-            includePreset: true,
-            includeInstruct: true,
-        },
-        overridePayload,
-        /**
-         * 上游专有的「停止生成」字段。
-         *
-         * 酒馆中止上游靠的是浏览器连接关闭；有些上游还会认一个显式的
-         * 请求体字段（例如 Cline 的 abort）。名字各家用得不一样，所以做成可配置。
-         */
-        abortFlag: String(settings.abortFlag ?? '').trim(),
-        maxTokens: Number(settings.maxTokens) || 2048,
-        messages,
-    };
-}
-
-/** 消费流式迭代器，边收边回调 */
-async function consumeStream(streamFn, onProgress, signal) {
-    let text = '';
-    let reasoning = '';
-    let chunks = 0;
-
-    const iterator = streamFn();
-
-    for await (const chunk of iterator) {
-        if (signal?.aborted) {
-            try {
-                await iterator.return?.();
-            } catch { /* 迭代器可能已经结束 */ }
-            const err = new Error('user abort');
-            err.name = 'AbortError';
-            throw err;
-        }
-
-        text = chunk?.text ?? text;
-        reasoning = chunk?.state?.reasoning ?? reasoning;
-        chunks++;
-        onProgress?.({ text, reasoning, chunks });
-    }
-
-    return { text, reasoning, chunks };
-}
-
-/**
- * 把外部的 AbortSignal 和内部控制器的信号合并。
- *
- * 为什么需要内部控制器：酒馆后端是靠「浏览器连接关闭」来中止上游请求的
- * （request.socket.on('close', () => controller.abort())）。
- * 而流式迭代器被 break 掉只是不再读，**不会关闭 fetch 的 body reader**，
- * 连接还挂着 —— 结果就是前台停了、后台模型还在继续生成。
- * 所以必须让 fetch 拿到一个真的会被 abort 的 signal。
- */
-function mergeSignals(external, internal) {
-    if (!external) return internal.signal;
-    if (external.aborted) {
-        internal.abort();
-        return internal.signal;
-    }
-    external.addEventListener('abort', () => internal.abort(), { once: true });
-    return internal.signal;
-}
-
-/**
- * 最近一次各阶段实际发出的请求体。
- * 用于排查「参数到底有没有发出去」——诊断面板会读它。
- */
-const lastRequests = { critic: null, final: null };
-
-export function getLastRequests() {
-    return {
-        critic: lastRequests.critic ? JSON.parse(JSON.stringify(lastRequests.critic)) : null,
-        final: lastRequests.final ? JSON.parse(JSON.stringify(lastRequests.final)) : null,
-    };
-}
-
-/**
- * 跑一个阶段。
- *
- * @param {'critic'|'final'} stage
- * @param {object} settings 该阶段设置
- * @param {Array<{role:string, content:string}>} messages
- * @param {object} options
- * @param {AbortSignal} [options.signal]
- * @param {(info: object) => void} [options.onProgress]
- * @param {object} [options.topLevelPayload] 必须是 request.body 顶层的字段
- * @returns {Promise<{content:string, reasoning:string, mode:'stream'|'plain', retried:boolean}>}
- */
-export async function runStage(stage, settings, messages, options = {}) {
-    const service = getService();
-    const { signal, onProgress, topLevelPayload } = options;
-
-    const args = buildRequestArgs(settings, messages, signal);
-
-    // 每一次尝试用一个新的内部控制器，合并外部信号
-    const attempt = async (useStream) => {
-        const internal = new AbortController();
-        const effectiveSignal = mergeSignals(signal, internal);
-
-        // 顶层字段混进请求体，而不是塞进 overridePayload
-        const requestData = { ...(topLevelPayload ?? {}) };
-        if (args.abortFlag) requestData[args.abortFlag] = false;
-
-        // 把真正要发出去的东西记下来。
-        // 「附加参数没发出去」这类问题，光看代码定位不了 ——
-        // 必须看到合并后的请求体，以及 sendRequest 实际收到了什么。
-        const merged = { ...requestData, ...args.overridePayload };
-        lastRequests[stage] = {
-            profileId: args.profileId,
-            stream: useStream,
-            overridePayload: args.overridePayload,
-            requestData,
-            merged,
-            abortFlag: args.abortFlag,
-        };
-        console.log(`[AgentWriter] ${stage} 发出的请求体 →`, merged);
-
-        const result = await service.sendRequest(
-            args.profileId,
-            args.messages,
-            args.maxTokens,
-            { ...args.options, stream: useStream, signal: effectiveSignal },
-            args.overridePayload,
-            requestData,
-        );
-
-        if (useStream) {
-            if (typeof result !== 'function') {
-                return { content: '', reasoning: '', mode: 'stream' };
-            }
-            try {
-                const { text, reasoning } = await consumeStream(result, onProgress, effectiveSignal);
-                return { content: text, reasoning, mode: 'stream' };
-            } finally {
-                // 无论如何都要断开连接，让酒馆后端收到 close 并中止上游
-                if (!internal.signal.aborted) internal.abort();
-            }
-        }
-
-        return {
-            content: String(result?.content ?? ''),
-            reasoning: String(result?.reasoning ?? ''),
-            mode: 'plain',
-        };
-    };
-
-    const first = await attempt(!!settings.useStream);
-
-    // 空正文 + 允许重试 ⇒ 换一条路再试一次。
-    // 这条分支就是为 Cline 这类「非流式包裹格式解析不了」的上游准备的。
-    const empty = !String(first.content ?? '').trim();
-    if (empty && settings.autoRetryOnEmpty) {
-        const other = !settings.useStream;
-        console.warn(`[AgentWriter] ${stage} 阶段拿到空正文（${first.mode}），改用${other ? '流式' : '非流式'}重试`);
-        const second = await attempt(other);
-        return { ...second, retried: true };
-    }
-
-    return { ...first, retried: false };
-}
-
-/**
- * 跑完整流水线，并把结果写回聊天楼层。
- *
- * 注意 ②③ 走的是纯 HTTP 请求，**不会往 chat 里写任何东西**，
- * 所以不需要把草稿从 chat 里摘出去再放回来。
- *
- * @param {object} options
- * @param {object} options.settings 完整设置
- * @param {number} options.messageIndex 草稿所在楼层
- * @param {string} options.draft 草稿正文
- * @param {string} [options.draftReasoning] 草稿的思维链（来自酒馆原生生成）
- * @param {(stage: string, info: object) => void} [options.onStage]
- * @param {AbortSignal} [options.signal]
- */
-export async function runPipeline({ settings, messageIndex, draft, draftReasoning = '', onStage, signal }) {
-    const context = ctx();
-    if (!context) throw new Error('SillyTavern.getContext() 不可用');
-
-    const report = (stage, info) => {
-        try {
-            onStage?.(stage, info);
-        } catch (e) {
-            console.warn('[AgentWriter] onStage 回调出错', e);
-        }
-    };
-
-    if (!String(draft ?? '').trim()) {
-        throw new Error('草稿是空的');
-    }
-
-    // 世界书激活结果会随对话变化，每次跑流水线重新扫描
-    invalidatePrefixCache();
-
-    // 草稿本身先展示（含酒馆原生生成时的思维链）
-    report('draft', { phase: 'done', text: draft, reasoning: draftReasoning });
-
-    // ---------- ② 校验 ----------
-    report('critic', { phase: 'start' });
-
-    const criticMessages = await buildCriticMessages({
-        settings: settings.critic,
-        draft,
-        draftIndex: messageIndex,
-        ctx: context,
-    });
-
-    const criticResult = await runStage('critic', settings.critic, criticMessages, {
-        signal,
-        // json_schema 必须是顶层字段，酒馆才会转成 response_format
-        topLevelPayload: settings.critic.useJsonSchema ? { json_schema: CRITIQUE_SCHEMA } : {},
-        onProgress: ({ text, reasoning, chunks }) => {
-            report('critic', { phase: 'progress', text, reasoning, chunks });
-        },
-    });
-
-    const critiqueText = String(criticResult.content ?? '').trim();
-    if (!critiqueText) {
-        report('critic', { phase: 'error', message: '校验阶段没拿到内容' });
-        return {
-            ok: false,
-            stage: 'critic',
-            reason: '校验阶段没拿到内容',
-            draft,
-            critic: criticResult,
-        };
-    }
-
-    const parsed = parseCritique(critiqueText);
-    report('critic', {
-        phase: 'done',
-        text: critiqueText,
-        reasoning: criticResult.reasoning,
-        parsed,
-        mode: criticResult.mode,
-        retried: criticResult.retried,
-    });
-
-    // ---------- 校验跑飞就中止，别拿垃圾去改写 ----------
-    const runaway = looksRunaway(critiqueText, parsed);
-    if (runaway) {
-        report('final', { phase: 'skipped', reason: `校验结果疑似异常，已中止：${runaway}` });
-        return {
-            ok: false,
-            stage: 'critic',
-            reason: `校验结果疑似异常：${runaway}`,
-            draft,
-            critique: critiqueText,
-            parsed,
-            critic: criticResult,
-        };
-    }
-
-    // ---------- 无需修改就跳过 ③ ----------
-    if (isClean(parsed, critiqueText)) {
-        report('final', { phase: 'skipped', reason: '校验判定无需修改' });
-        return {
-            ok: true,
-            replaced: false,
-            draft,
-            critique: critiqueText,
-            parsed,
-            critic: criticResult,
-        };
-    }
-
-    // ---------- ③ 改写 ----------
-    // 结构化输出就用渲染后的清单，纯文本就直接用原文
-    const critiqueForRewrite = parsed ? renderCritique(parsed) : critiqueText;
-    report('final', { phase: 'start' });
-
-    const rewriteMessages = await buildRewriteMessages({
-        settings: settings.final,
-        draft,
-        critiqueText: critiqueForRewrite,
-        ctx: context,
-    });
-
-    const finalResult = await runStage('final', settings.final, rewriteMessages, {
-        signal,
-        onProgress: ({ text, reasoning, chunks }) => {
-            report('final', { phase: 'progress', text, reasoning, chunks });
-        },
-    });
-
-    const finalText = String(finalResult.content ?? '').trim();
-    if (!finalText) {
-        report('final', { phase: 'error', message: '改写阶段没拿到内容' });
-        return {
-            ok: false,
-            stage: 'final',
-            reason: '改写阶段没拿到内容',
-            draft,
-            critique: critiqueText,
-            parsed,
-            critic: criticResult,
-            final: finalResult,
-        };
-    }
-
-    report('final', {
-        phase: 'done',
-        text: finalText,
-        reasoning: finalResult.reasoning,
-        mode: finalResult.mode,
-        retried: finalResult.retried,
-    });
-
-    // ---------- 写回楼层 ----------
-    const message = context.chat?.[messageIndex];
-    if (!message) {
-        throw new Error(`找不到第 ${messageIndex} 楼`);
-    }
-
-    // 记下原始草稿：调用方据此判断"这一层已经被处理过"，避免自动模式反复触发
-    message.extra = { ...(message.extra ?? {}), agent_writer: { draft } };
-    message.mes = finalText;
-    if (Array.isArray(message.swipes) && message.swipes.length) {
-        message.swipes = [finalText];
-        message.swipe_id = 0;
-        message.swipe_info = [];
-    }
-
-    await context.saveChat?.();
-    try {
-        context.updateMessageBlock?.(messageIndex, message, { rerenderMessage: true });
-    } catch (e) {
-        console.warn('[AgentWriter] 刷新楼层显示失败，尝试整页重绘', e);
-        try {
-            await context.printMessages?.();
-        } catch { /* 尽力而为 */ }
-    }
-
-    return {
-        ok: true,
-        replaced: true,
-        messageIndex,
-        draft,
-        finalText,
-        critique: critiqueText,
-        parsed,
-        critic: criticResult,
-        final: finalResult,
-    };
 }
 
 /** 找最后一条 assistant 楼层 */
@@ -431,9 +50,7 @@ export function findLastAssistantIndex(chat) {
 
 /**
  * 取一条消息的思维链。
- *
- * 酒馆原生生成的思维链挂在消息对象上，不同版本字段不一样，所以多试几个位置。
- * 拿不到就返回空串，不影响主流程。
+ * 酒馆原生生成的思维链挂在消息对象上，不同版本字段不一样，多试几个位置。
  */
 export function extractReasoning(message) {
     if (!message || typeof message !== 'object') return '';
@@ -459,3 +76,248 @@ export function extractReasoning(message) {
 
     return '';
 }
+
+// ---------------------------------------------------------------------------
+// 思维链收集
+//
+// 酒馆助手不返回思维链，但酒馆自己会发 STREAM_REASONING_DONE。
+// 这里在整个流水线期间挂一次监听，跑完清掉。
+// ---------------------------------------------------------------------------
+
+const reasonings = new Map();
+let reasoningHook = null;
+
+function hookReasoning() {
+    if (hookReasoning.unavailable) return;
+    const context = ctx();
+    const eventSource = context?.eventSource;
+    const eventTypes = context?.eventTypes;
+    if (!eventSource?.on || !eventTypes?.STREAM_REASONING_DONE) return;
+
+    try {
+        reasoningHook = eventSource.on(eventTypes.STREAM_REASONING_DONE, (reasoning, _duration, messageId) => {
+            if (typeof reasoning === 'string' && reasoning.trim()) {
+                reasonings.set(String(messageId ?? 'last'), reasoning);
+            }
+        });
+    } catch (e) {
+        console.warn('[AgentWriter] 挂思维链监听失败', e);
+        hookReasoning.unavailable = true;
+    }
+}
+
+function unhookReasoning() {
+    try {
+        reasoningHook?.stop?.();
+    } catch { /* 忽略 */ }
+    reasoningHook = null;
+    reasonings.clear();
+}
+
+function takeReasoning() {
+    if (reasonings.size === 0) return '';
+    // 取最长的一条 —— 通常就是本次生成的
+    let best = '';
+    for (const value of reasonings.values()) {
+        if (value.length > best.length) best = value;
+    }
+    reasonings.clear();
+    return best;
+}
+
+// ---------------------------------------------------------------------------
+// 单阶段
+// ---------------------------------------------------------------------------
+
+/**
+ * 跑一个阶段：注入槽位 → 生成 → 还原槽位。
+ *
+ * @param {object} options
+ * @param {'critic'|'final'} options.stage
+ * @param {object} options.settings 该阶段设置
+ * @param {string} options.instruction 要注入的指令
+ * @param {string} options.generationId
+ * @param {AbortSignal} [options.signal]
+ * @param {(info: object) => void} [options.onProgress]
+ * @returns {Promise<{content: string, reasoning: string}>}
+ */
+async function runOneStage({ stage, settings, instruction, generationId, signal, onProgress }) {
+    const slotName = settings.slotName;
+    const tag = `__AW_${generationId}__`;
+    let injected = false;
+
+    try {
+        if (signal?.aborted) throw Object.assign(new Error('user abort'), { name: 'AbortError' });
+
+        await injectSlot(slotName, instruction);
+        injected = true;
+
+        // 请求体附加字段走事件注入（provider 私有参数，例如思考开关）
+        setPendingPayload(tag, { ...(settings.bodyFields ?? {}) });
+
+        const content = await tavernGenerate({
+            stage: settings,
+            generationId,
+            signal,
+            onProgress: (text) => onProgress?.({ text, reasoning: '' }),
+        });
+
+        return { content: String(content ?? '').trim(), reasoning: takeReasoning() };
+    } finally {
+        clearPendingPayload(tag);
+        if (injected) {
+            await restoreSlot(slotName);
+        }
+    }
+}
+
+/**
+ * 跑完整流水线，并把结果写回聊天楼层。
+ *
+ * 注意 ②③ 走的是酒馆助手的 generate()，**不会往 chat 里写任何东西**，
+ * 所以草稿不需要从 chat 里摘出去再放回来 —— 它一直待在原地，
+ * 校验者看的就是「历史最后一条」。
+ *
+ * @param {object} options
+ * @param {object} options.settings 完整设置
+ * @param {number} options.messageIndex 草稿所在楼层
+ * @param {string} options.draft 草稿正文
+ * @param {string} [options.draftReasoning]
+ * @param {(stage: string, info: object) => void} [options.onStage]
+ * @param {AbortSignal} [options.signal]
+ */
+export async function runPipeline({ settings, messageIndex, draft, draftReasoning = '', onStage, signal }) {
+    const context = ctx();
+    if (!context) throw new Error('SillyTavern.getContext() 不可用');
+
+    const report = (stage, info) => {
+        try {
+            onStage?.(stage, info);
+        } catch (e) {
+            console.warn('[AgentWriter] onStage 回调出错', e);
+        }
+    };
+
+    if (!String(draft ?? '').trim()) throw new Error('草稿是空的');
+
+    hookReasoning();
+
+    try {
+        report('draft', { phase: 'done', text: draft, reasoning: draftReasoning });
+
+        // ---------- ② 校验 ----------
+        report('critic', { phase: 'start' });
+
+        const criticResult = await runOneStage({
+            stage: 'critic',
+            settings: settings.critic,
+            instruction: buildCritiqueInstruction(settings.critic),
+            generationId: `aw-critic-${Date.now()}`,
+            signal,
+            onProgress: (info) => report('critic', { phase: 'progress', ...info }),
+        });
+
+        const critiqueText = criticResult.content;
+        if (!critiqueText) {
+            report('critic', { phase: 'error', message: '校验阶段没拿到内容' });
+            return { ok: false, stage: 'critic', reason: '校验阶段没拿到内容', draft, critic: criticResult };
+        }
+
+        const parsed = parseCritique(critiqueText);
+        report('critic', {
+            phase: 'done',
+            text: critiqueText,
+            reasoning: criticResult.reasoning,
+            parsed,
+        });
+
+        // ---------- 校验跑飞就中止，别拿垃圾去改写 ----------
+        const runaway = looksRunaway(critiqueText, parsed);
+        if (runaway) {
+            report('final', { phase: 'skipped', reason: `校验结果疑似异常，已中止：${runaway}` });
+            return {
+                ok: false,
+                stage: 'critic',
+                reason: `校验结果疑似异常：${runaway}`,
+                draft,
+                critique: critiqueText,
+                parsed,
+                critic: criticResult,
+            };
+        }
+
+        // ---------- 无需修改就跳过 ③ ----------
+        if (isClean(parsed, critiqueText)) {
+            report('final', { phase: 'skipped', reason: '校验判定无需修改' });
+            return { ok: true, replaced: false, draft, critique: critiqueText, parsed, critic: criticResult };
+        }
+
+        // ---------- ③ 改写 ----------
+        report('final', { phase: 'start' });
+
+        const finalResult = await runOneStage({
+            stage: 'final',
+            settings: settings.final,
+            instruction: buildRewriteInstruction(settings.final, critiqueText),
+            generationId: `aw-final-${Date.now()}`,
+            signal,
+            onProgress: (info) => report('final', { phase: 'progress', ...info }),
+        });
+
+        const finalText = finalResult.content;
+        if (!finalText) {
+            report('final', { phase: 'error', message: '改写阶段没拿到内容' });
+            return {
+                ok: false,
+                stage: 'final',
+                reason: '改写阶段没拿到内容',
+                draft,
+                critique: critiqueText,
+                parsed,
+                critic: criticResult,
+                final: finalResult,
+            };
+        }
+
+        report('final', { phase: 'done', text: finalText, reasoning: finalResult.reasoning });
+
+        // ---------- 写回楼层 ----------
+        const message = context.chat?.[messageIndex];
+        if (!message) throw new Error(`找不到第 ${messageIndex} 楼`);
+
+        // 记下原始草稿：调用方据此判断「这一层已经处理过」，避免自动模式循环
+        message.extra = { ...(message.extra ?? {}), agent_writer: { draft } };
+        message.mes = finalText;
+        if (Array.isArray(message.swipes) && message.swipes.length) {
+            message.swipes = [finalText];
+            message.swipe_id = 0;
+            message.swipe_info = [];
+        }
+
+        await context.saveChat?.();
+        try {
+            context.updateMessageBlock?.(messageIndex, message, { rerenderMessage: true });
+        } catch (e) {
+            console.warn('[AgentWriter] 刷新楼层显示失败，尝试整页重绘', e);
+            try {
+                await context.printMessages?.();
+            } catch { /* 尽力而为 */ }
+        }
+
+        return {
+            ok: true,
+            replaced: true,
+            messageIndex,
+            draft,
+            finalText,
+            critique: critiqueText,
+            parsed,
+            critic: criticResult,
+            final: finalResult,
+        };
+    } finally {
+        unhookReasoning();
+    }
+}
+
+export { recoverSlots };

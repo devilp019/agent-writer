@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.5.0';
+import { demoState } from '../state.js?v=0.6.0';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -30,29 +30,40 @@ function esc(s) {
  * 动态生成一个阶段的配置控件。
  * 动态生成而不是写死在模板里：字段会随阶段增减，写死容易漏 id（烟测能发现，但没必要）。
  */
-function stageFieldsHTML(stage, settings) {
+function stageFieldsHTML(stage, settings, proxyNames = []) {
     const s = settings?.[stage] ?? {};
     const id = (name) => `aw-${stage}-${name}`;
 
+    const options = [
+        `<option value="">（用当前连接）</option>`,
+        ...proxyNames.map((n) => `<option value="${esc(n)}" ${n === s.proxyPreset ? 'selected' : ''}>${esc(n)}</option>`),
+    ];
+    if (s.proxyPreset && !proxyNames.includes(s.proxyPreset)) {
+        options.push(`<option value="${esc(s.proxyPreset)}" selected>${esc(s.proxyPreset)}（已不在列表里）</option>`);
+    }
+
     return `
         <label class="aw-field">
-            <span>连接配置</span>
-            <select id="${id('profile')}"><option value="">（加载中…）</option></select>
+            <span>注入槽位条目名（在预设里手工新建的条目）</span>
+            <input type="text" id="${id('slot')}" value="${esc(s.slotName ?? '')}" placeholder="例如 AW-校验">
+            <em class="aw-tip">指令写进这个条目，位置和身份由你在预设里控制 —— 末尾注入盖不住预设里更靠后的强提示词。</em>
         </label>
 
         <label class="aw-field">
-            <span>模型覆盖（留空则用配置自带的）</span>
-            <input type="text" id="${id('model')}" value="${esc(s.model)}" placeholder="留空 = 不覆盖">
-        </label>
-
-        <label class="aw-switch aw-switch-block">
-            <input type="checkbox" id="${id('thinking')}" ${s.overridePayload?.thinking ? 'checked' : ''}>
-            <span>开启思考</span>
+            <span>渠道（酒馆代理预设）</span>
+            <select id="${id('proxy')}">${options.join('')}</select>
+            <em class="aw-tip">换渠道用它；留空则用当前连接。代理预设要在酒馆里先建好。</em>
         </label>
 
         <label class="aw-field">
-            <span>附加请求体 JSON（整块覆盖根字段；思考开关由这里最终决定）</span>
-            <textarea id="${id('body')}" rows="3">${esc(JSON.stringify(s.overridePayload ?? {}, null, 2))}</textarea>
+            <span>模型覆盖（留空 = 不覆盖）</span>
+            <input type="text" id="${id('model')}" value="${esc(s.model ?? '')}" placeholder="留空 = 不覆盖">
+        </label>
+
+        <label class="aw-field">
+            <span>附加请求体字段 JSON（顶层字段，provider 私有参数）</span>
+            <textarea id="${id('bodyfields')}" rows="3">${esc(JSON.stringify(s.bodyFields ?? {}, null, 2))}</textarea>
+            <em class="aw-tip">例如开思考填 {"thinking":{"type":"enabled"}}。通过 CHAT_COMPLETION_SETTINGS_READY 注入，不走 custom_include_body。</em>
         </label>
 
         <div class="aw-grid">
@@ -66,44 +77,10 @@ function stageFieldsHTML(stage, settings) {
             </label>
         </div>
 
-        ${stage === 'critic' ? `
-        <div class="aw-grid">
-            <label class="aw-field">
-                <span>可见楼层数</span>
-                <input type="number" step="1" min="0" id="${id('depth')}" value="${esc(s.contextDepth)}">
-            </label>
-            <label class="aw-switch aw-switch-block">
-                <input type="checkbox" id="${id('charcard')}" ${s.includeCharCard ? 'checked' : ''}>
-                <span>注入角色卡摘要</span>
-            </label>
-        </div>
         <label class="aw-switch aw-switch-block">
-            <input type="checkbox" id="${id('worldinfo')}" ${s.includeWorldInfo !== false ? 'checked' : ''}>
-            <span>注入世界书</span>
-            <em class="aw-tip">校验「是否违反世界观设定」必须有它。关闭后校验者只能凭草稿和前文判断。改写阶段沿用同一份设定，以保持前缀一致（缓存友好）。</em>
-        </label>
-        <label class="aw-switch aw-switch-block">
-            <input type="checkbox" id="${id('jsonschema')}" ${s.useJsonSchema ? 'checked' : ''}>
-            <span>用原生 JSON Schema 约束输出</span>
-            <em class="aw-tip">默认关闭：会走酒馆的 response_format，自定义来源未必支持（不支持时上游会报错）。关闭时靠提示词约束格式，更通用。</em>
-        </label>
-        ` : ''}
-
-        <label class="aw-switch aw-switch-block">
-            <input type="checkbox" id="${id('stream')}" ${s.useStream ? 'checked' : ''}>
+            <input type="checkbox" id="${id('stream')}" ${s.useStream !== false ? 'checked' : ''}>
             <span>走流式</span>
             <em class="aw-tip">部分上游（如 Cline）非流式解析不了，建议保持开启</em>
-        </label>
-
-        <label class="aw-switch aw-switch-block">
-            <input type="checkbox" id="${id('autoretry')}" ${s.autoRetryOnEmpty ? 'checked' : ''}>
-            <span>空正文时自动重试</span>
-            <em class="aw-tip">拿到空正文时换另一种模式再试一次</em>
-        </label>
-
-        <label class="aw-field">
-            <span>停止字段名（上游专有，留空 = 不发）</span>
-            <input type="text" id="${id('abortflag')}" value="${esc(s.abortFlag ?? '')}" placeholder="例如 abort">
         </label>
     `;
 }
@@ -113,90 +90,64 @@ function readStage(el, stage, current) {
     const get = (name) => el.querySelector(`#aw-${stage}-${name}`);
     const next = { ...current };
 
-    next.profileId = get('profile')?.value ?? current.profileId;
+    next.slotName = (get('slot')?.value ?? '').trim();
+    next.proxyPreset = get('proxy')?.value ?? '';
     next.model = (get('model')?.value ?? '').trim();
     next.temperature = parseFloat(get('temp')?.value) || current.temperature;
     next.maxTokens = parseInt(get('maxtokens')?.value, 10) || current.maxTokens;
     next.useStream = !!get('stream')?.checked;
-    next.autoRetryOnEmpty = !!get('autoretry')?.checked;
-    next.abortFlag = (get('abortflag')?.value ?? '').trim();
 
-    if (stage === 'critic') {
-        next.contextDepth = parseInt(get('depth')?.value, 10) || 0;
-        next.includeCharCard = !!get('charcard')?.checked;
-        next.includeWorldInfo = !!get('worldinfo')?.checked;
-        next.useJsonSchema = !!get('jsonschema')?.checked;
-    }
-
-    // 附加请求体：以文本框为准（它是最终裁决者），但「开启思考」勾选框优先
     try {
-        const raw = get('body')?.value ?? '{}';
+        const raw = get('bodyfields')?.value ?? '{}';
         const parsed = raw.trim() ? JSON.parse(raw) : {};
-        next.overridePayload = parsed && typeof parsed === 'object' ? parsed : {};
+        next.bodyFields = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
     } catch {
         // JSON 写坏了就保留原来那份，别把用户刚写的内容丢掉
         log(`${STAGE_LABELS[stage]} 的附加请求体不是合法 JSON，本次未采纳`);
     }
 
-    const thinkingOn = !!get('thinking')?.checked;
-    next.overridePayload = {
-        ...next.overridePayload,
-        thinking: { type: thinkingOn ? 'enabled' : 'disabled' },
-    };
-
     return next;
-}
-
-/** 把连接配置列表填进下拉框，并处理增删改 */
-function setupProfileDropdown(el, stage, settings, onPick) {
-    const select = el.querySelector(`#aw-${stage}-profile`);
-    if (!select) return;
-
-    const svc = globalThis.SillyTavern?.getContext?.()?.ConnectionManagerRequestService
-        ?? globalThis.ConnectionManagerRequestService;
-
-    if (!svc?.handleDropdown) {
-        select.innerHTML = '<option value="">（连接管理器不可用）</option>';
-        return;
-    }
-
-    try {
-        svc.handleDropdown(
-            `#aw-${stage}-profile`,
-            settings[stage]?.profileId ?? '',
-            (profile) => onPick(profile?.id ?? ''),
-        );
-    } catch (e) {
-        console.warn('[AgentWriter] 填连接配置下拉失败', e);
-        select.innerHTML = '<option value="">（读取失败，见控制台）</option>';
-    }
 }
 
 /** 渲染两个阶段的配置控件并绑定事件 */
 function renderStageCards(el, settings) {
     const state = { critic: { ...settings.critic }, final: { ...settings.final } };
+    const proxyNames = getProxyNames();
+
+    if (proxyNames.length === 0) {
+        console.warn('[AgentWriter] 代理预设列表为空 —— 要么没装酒馆助手，要么酒馆里还没建代理预设');
+    }
 
     for (const stage of ['critic', 'final']) {
         const holder = el.querySelector(`#aw-fields-${stage}`);
         if (!holder) continue;
-        holder.innerHTML = stageFieldsHTML(stage, settings);
-
-        setupProfileDropdown(el, stage, settings, (profileId) => {
-            state[stage].profileId = profileId;
-        });
+        holder.innerHTML = stageFieldsHTML(stage, settings, proxyNames);
 
         // 控件变化 ⇒ 收集并保存
-        holder.addEventListener('input', () => {
+        const collect = () => {
             state[stage] = readStage(el, stage, state[stage]);
             mountOptions.onStageChange?.(stage, state[stage]);
-        });
-        holder.addEventListener('change', () => {
-            state[stage] = readStage(el, stage, state[stage]);
-            mountOptions.onStageChange?.(stage, state[stage]);
-        });
+        };
+        holder.addEventListener('input', collect);
+        holder.addEventListener('change', collect);
     }
 
     return state;
+}
+
+/**
+ * 取酒馆代理预设名列表（来自酒馆助手）。
+ * 拿不到不算致命 —— 下拉框会只剩「用当前连接」一项，
+ * 用户仍可手填槽位名走当前连接。
+ */
+function getProxyNames() {
+    try {
+        const names = globalThis.TavernHelper?.getProxyPresetNames?.();
+        return Array.isArray(names) ? names.filter((n) => n && n !== 'None') : [];
+    } catch (e) {
+        console.warn('[AgentWriter] 读取代理预设列表失败', e);
+        return [];
+    }
 }
 
 // ---------------------------------------------------------------------------
