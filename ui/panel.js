@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.22';
+import { demoState } from '../state.js?v=0.8.23';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -15,6 +15,19 @@ let panel = null;
 let logLines = [];
 let onAutoChange = null;
 let mountOptions = {};
+
+/**
+ * 面板被重建的次数。
+ *
+ * > 1 说明有东西在反复重建它 —— 重建会清空所有输出框，
+ * 用户报告的「框闪一下就不见了」很可能就是这个。诊断里会显示它。
+ */
+let mountCount = 0;
+
+/** 给诊断用：面板被重建过几次 */
+export function getMountCount() {
+    return mountCount;
+}
 
 // ---------------------------------------------------------------------------
 // 阶段配置控件
@@ -326,7 +339,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.22';
+export const VERSION = '0.8.23';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -361,20 +374,46 @@ const OUTPUT_IDS = {
  * 写入输出区。流式过程中会被高频调用，所以只碰必要节点。
  * @param {'draft'|'critic'|'final'} stage
  */
+/**
+ * 最近一次写入的内容。
+ *
+ * 为什么要有它：面板可能被**重建**（重建会清空所有输出框），而重建的时机
+ * 不受扩展控制 —— 实测用户遇到「框闪一下就不见了」。
+ * 把内容留一份，重建后立刻恢复，输出就不会凭空消失。
+ */
+const lastOutputs = {
+    draft: { text: '', reasoning: '' },
+    critic: { text: '', reasoning: '' },
+    final: { text: '', reasoning: '' },
+};
+
 export function writeOutput(stage, text, reasoning) {
     const ids = OUTPUT_IDS[stage];
     if (!ids) return;
 
+    // 先留档，再写 DOM —— 中间任何异常都不至于两边都不对
+    if (text !== undefined) lastOutputs[stage].text = text ?? '';
+    if (reasoning !== undefined) lastOutputs[stage].reasoning = reasoning ?? '';
+
     const textEl = document.getElementById(ids.text);
-    if (textEl) textEl.value = text ?? '';
+    if (textEl) textEl.value = lastOutputs[stage].text;
     const statsEl = document.getElementById(ids.stats);
-    if (statsEl) statsEl.textContent = text ? `${text.length} 字` : '';
+    if (statsEl) statsEl.textContent = lastOutputs[stage].text ? `${lastOutputs[stage].text.length} 字` : '';
 
     if (ids.reasoning) {
         const rEl = document.getElementById(ids.reasoning);
-        if (rEl) rEl.value = reasoning ?? '';
+        if (rEl) rEl.value = lastOutputs[stage].reasoning;
         const rStats = document.getElementById(ids.reasoningStats);
-        if (rStats) rStats.textContent = reasoning ? `${reasoning.length} 字` : '(无)';
+        if (rStats) rStats.textContent = lastOutputs[stage].reasoning ? `${lastOutputs[stage].reasoning.length} 字` : '(无)';
+    }
+}
+
+/** 面板重建后把留档的输出写回去 */
+function restoreOutputs() {
+    for (const stage of Object.keys(OUTPUT_IDS)) {
+        const o = lastOutputs[stage];
+        if (!o) continue;
+        if (o.text || o.reasoning) writeOutput(stage, o.text, o.reasoning);
     }
 }
 
@@ -543,6 +582,13 @@ export function mountPanel(options = {}) {
     }
     mountOptions = options;
 
+    // 记下重建次数 —— 输出框「闪一下就不见了」多半就是重建导致的。
+    // 有了这个计数，日志里能直接看出到底重建过几次。
+    mountCount++;
+    if (mountCount > 1) {
+        console.warn(`[AgentWriter] 面板被重建（第 ${mountCount} 次）`);
+    }
+
     const holder = document.createElement('div');
     holder.innerHTML = PANEL_HTML;
     const el = holder.querySelector(`#${PANEL_ID}`);
@@ -562,6 +608,14 @@ export function mountPanel(options = {}) {
     fillPromptEditors(el, options.settings);
     switchTab(options.settings?.ui?.tab ?? 'params');
     applyLayout();
+
+    // 面板可能是被重建的（那会清空所有输出框）。把留档写回去，
+    // 免得用户看到「框里明明有过内容、闪一下就没了」。
+    try {
+        restoreOutputs();
+    } catch (e) {
+        console.warn('[AgentWriter] 恢复输出内容失败', e);
+    }
 
     window.addEventListener('resize', onViewportChange);
     window.addEventListener('orientationchange', onViewportChange);

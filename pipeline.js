@@ -24,7 +24,7 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
-} from './stages.js?v=0.8.22';
+} from './stages.js?v=0.8.23';
 import {
     injectSlot,
     restoreSlot,
@@ -34,7 +34,7 @@ import {
     makePayloadTag,
     takeLastBody,
     recoverSlots,
-} from './tavern.js?v=0.8.22';
+} from './tavern.js?v=0.8.23';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -285,6 +285,14 @@ export async function runPipeline({ settings, messageIndex, draft, draftReasonin
     if (!String(draft ?? '').trim()) throw new Error('草稿是空的');
 
     hookReasoning();
+
+    // ⚠️ 每次跑流水线先把上一轮留下的思维链清掉。
+    //
+    // reasonings 是模块级的 Map，它只在 takeReasoning() 里被清 ——
+    // 如果某次没走到那里（例如中途抛错），残留会一直留着，
+    // 于是下一轮 peekReasoning() 读到的其实是**上一轮的思维链**。
+    // 用户实测到的「第二次点的时候思维链框里显示上一次的」正是这个。
+    reasonings.clear();
 
     try {
         report('draft', { phase: 'done', text: draft, reasoning: draftReasoning });
