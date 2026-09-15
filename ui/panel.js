@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js';
+import { demoState } from '../state.js?v=0.4.0';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -15,6 +15,176 @@ let panel = null;
 let logLines = [];
 let onAutoChange = null;
 let mountOptions = {};
+
+// ---------------------------------------------------------------------------
+// 阶段配置控件
+// ---------------------------------------------------------------------------
+
+const STAGE_LABELS = { critic: '② 校验', final: '③ 改写' };
+
+function esc(s) {
+    return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * 动态生成一个阶段的配置控件。
+ * 动态生成而不是写死在模板里：字段会随阶段增减，写死容易漏 id（烟测能发现，但没必要）。
+ */
+function stageFieldsHTML(stage, settings) {
+    const s = settings?.[stage] ?? {};
+    const id = (name) => `aw-${stage}-${name}`;
+
+    return `
+        <label class="aw-field">
+            <span>连接配置</span>
+            <select id="${id('profile')}"><option value="">（加载中…）</option></select>
+        </label>
+
+        <label class="aw-field">
+            <span>模型覆盖（留空则用配置自带的）</span>
+            <input type="text" id="${id('model')}" value="${esc(s.model)}" placeholder="留空 = 不覆盖">
+        </label>
+
+        <label class="aw-switch aw-switch-block">
+            <input type="checkbox" id="${id('thinking')}" ${s.overridePayload?.thinking ? 'checked' : ''}>
+            <span>开启思考</span>
+        </label>
+
+        <label class="aw-field">
+            <span>附加请求体 JSON（整块覆盖根字段；思考开关由这里最终决定）</span>
+            <textarea id="${id('body')}" rows="3">${esc(JSON.stringify(s.overridePayload ?? {}, null, 2))}</textarea>
+        </label>
+
+        <div class="aw-grid">
+            <label class="aw-field">
+                <span>temperature</span>
+                <input type="number" step="0.05" id="${id('temp')}" value="${esc(s.temperature)}">
+            </label>
+            <label class="aw-field">
+                <span>max_tokens</span>
+                <input type="number" step="256" id="${id('maxtokens')}" value="${esc(s.maxTokens)}">
+            </label>
+        </div>
+
+        ${stage === 'critic' ? `
+        <div class="aw-grid">
+            <label class="aw-field">
+                <span>可见楼层数</span>
+                <input type="number" step="1" min="0" id="${id('depth')}" value="${esc(s.contextDepth)}">
+            </label>
+            <label class="aw-switch aw-switch-block">
+                <input type="checkbox" id="${id('charcard')}" ${s.includeCharCard ? 'checked' : ''}>
+                <span>注入角色卡摘要</span>
+            </label>
+        </div>
+        <label class="aw-switch aw-switch-block">
+            <input type="checkbox" id="${id('jsonschema')}" ${s.useJsonSchema ? 'checked' : ''}>
+            <span>结构化输出（JSON Schema）</span>
+        </label>
+        ` : ''}
+
+        <label class="aw-switch aw-switch-block">
+            <input type="checkbox" id="${id('stream')}" ${s.useStream ? 'checked' : ''}>
+            <span>走流式</span>
+            <em class="aw-tip">部分上游（如 Cline）非流式解析不了，建议保持开启</em>
+        </label>
+
+        <label class="aw-switch aw-switch-block">
+            <input type="checkbox" id="${id('autoretry')}" ${s.autoRetryOnEmpty ? 'checked' : ''}>
+            <span>空正文时自动重试</span>
+            <em class="aw-tip">拿到空正文时换另一种模式再试一次</em>
+        </label>
+    `;
+}
+
+/** 从控件读回一个阶段的配置 */
+function readStage(el, stage, current) {
+    const get = (name) => el.querySelector(`#aw-${stage}-${name}`);
+    const next = { ...current };
+
+    next.profileId = get('profile')?.value ?? current.profileId;
+    next.model = (get('model')?.value ?? '').trim();
+    next.temperature = parseFloat(get('temp')?.value) || current.temperature;
+    next.maxTokens = parseInt(get('maxtokens')?.value, 10) || current.maxTokens;
+    next.useStream = !!get('stream')?.checked;
+    next.autoRetryOnEmpty = !!get('autoretry')?.checked;
+
+    if (stage === 'critic') {
+        next.contextDepth = parseInt(get('depth')?.value, 10) || 0;
+        next.includeCharCard = !!get('charcard')?.checked;
+        next.useJsonSchema = !!get('jsonschema')?.checked;
+    }
+
+    // 附加请求体：以文本框为准（它是最终裁决者），但「开启思考」勾选框优先
+    try {
+        const raw = get('body')?.value ?? '{}';
+        const parsed = raw.trim() ? JSON.parse(raw) : {};
+        next.overridePayload = parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        // JSON 写坏了就保留原来那份，别把用户刚写的内容丢掉
+        log(`${STAGE_LABELS[stage]} 的附加请求体不是合法 JSON，本次未采纳`);
+    }
+
+    const thinkingOn = !!get('thinking')?.checked;
+    next.overridePayload = {
+        ...next.overridePayload,
+        thinking: { type: thinkingOn ? 'enabled' : 'disabled' },
+    };
+
+    return next;
+}
+
+/** 把连接配置列表填进下拉框，并处理增删改 */
+function setupProfileDropdown(el, stage, settings, onPick) {
+    const select = el.querySelector(`#aw-${stage}-profile`);
+    if (!select) return;
+
+    const svc = globalThis.SillyTavern?.getContext?.()?.ConnectionManagerRequestService
+        ?? globalThis.ConnectionManagerRequestService;
+
+    if (!svc?.handleDropdown) {
+        select.innerHTML = '<option value="">（连接管理器不可用）</option>';
+        return;
+    }
+
+    try {
+        svc.handleDropdown(
+            `#aw-${stage}-profile`,
+            settings[stage]?.profileId ?? '',
+            (profile) => onPick(profile?.id ?? ''),
+        );
+    } catch (e) {
+        console.warn('[AgentWriter] 填连接配置下拉失败', e);
+        select.innerHTML = '<option value="">（读取失败，见控制台）</option>';
+    }
+}
+
+/** 渲染两个阶段的配置控件并绑定事件 */
+function renderStageCards(el, settings) {
+    const state = { critic: { ...settings.critic }, final: { ...settings.final } };
+
+    for (const stage of ['critic', 'final']) {
+        const holder = el.querySelector(`#aw-fields-${stage}`);
+        if (!holder) continue;
+        holder.innerHTML = stageFieldsHTML(stage, settings);
+
+        setupProfileDropdown(el, stage, settings, (profileId) => {
+            state[stage].profileId = profileId;
+        });
+
+        // 控件变化 ⇒ 收集并保存
+        holder.addEventListener('input', () => {
+            state[stage] = readStage(el, stage, state[stage]);
+            mountOptions.onStageChange?.(stage, state[stage]);
+        });
+        holder.addEventListener('change', () => {
+            state[stage] = readStage(el, stage, state[stage]);
+            mountOptions.onStageChange?.(stage, state[stage]);
+        });
+    }
+
+    return state;
+}
 
 // ---------------------------------------------------------------------------
 // 位置
@@ -164,6 +334,52 @@ export function clearLog() {
 }
 
 // ---------------------------------------------------------------------------
+// 输出区
+// ---------------------------------------------------------------------------
+
+const OUTPUT_IDS = {
+    draft: { text: 'aw-draft', stats: 'aw-draft-stats' },
+    critic: { text: 'aw-report', stats: 'aw-report-stats', reasoning: 'aw-critic-reasoning', reasoningStats: 'aw-critic-reasoning-stats' },
+    final: { text: 'aw-final', stats: 'aw-final-stats', reasoning: 'aw-final-reasoning', reasoningStats: 'aw-final-reasoning-stats' },
+};
+
+/**
+ * 写入输出区。流式过程中会被高频调用，所以只碰必要节点。
+ * @param {'draft'|'critic'|'final'} stage
+ */
+export function writeOutput(stage, text, reasoning) {
+    const ids = OUTPUT_IDS[stage];
+    if (!ids) return;
+
+    const textEl = document.getElementById(ids.text);
+    if (textEl) textEl.value = text ?? '';
+    const statsEl = document.getElementById(ids.stats);
+    if (statsEl) statsEl.textContent = text ? `${text.length} 字` : '';
+
+    if (ids.reasoning) {
+        const rEl = document.getElementById(ids.reasoning);
+        if (rEl) rEl.value = reasoning ?? '';
+        const rStats = document.getElementById(ids.reasoningStats);
+        if (rStats) rStats.textContent = reasoning ? `${reasoning.length} 字` : '(无)';
+    }
+}
+
+export function clearOutputs() {
+    for (const stage of Object.keys(OUTPUT_IDS)) writeOutput(stage, '', '');
+}
+
+/** 运行按钮的忙碌态 */
+export function setRunning(busy, label) {
+    const run = document.getElementById('aw-run');
+    const stop = document.getElementById('aw-stop');
+    if (run) {
+        run.disabled = !!busy;
+        run.textContent = busy ? (label ?? '⏳ 运行中…') : '▶ 用最后一条 AI 回复作草稿';
+    }
+    if (stop) stop.disabled = !busy;
+}
+
+// ---------------------------------------------------------------------------
 // 渲染
 // ---------------------------------------------------------------------------
 
@@ -174,6 +390,7 @@ function switchTab(tab) {
     panel?.querySelectorAll('.aw-tab-panel').forEach((section) => {
         section.hidden = section.dataset.panel !== tab;
     });
+    mountOptions.onTabChange?.(tab);
 }
 
 function bindEvents(el) {
@@ -199,6 +416,13 @@ function bindEvents(el) {
 
     el.querySelector('#aw-auto')?.addEventListener('change', (event) => {
         onAutoChange?.(event.target.checked);
+    });
+
+    el.querySelector('#aw-run')?.addEventListener('click', () => {
+        mountOptions.onRun?.();
+    });
+    el.querySelector('#aw-stop')?.addEventListener('click', () => {
+        mountOptions.onStop?.();
     });
 
     // 自检与连通性测试由 index.js 注入，避免 panel 依赖 diagnostics
@@ -239,6 +463,11 @@ function bindEvents(el) {
  * @param {object} options
  * @param {(auto: boolean) => void} [options.onAutoChange]
  * @param {(state: string, detail: object|null) => void} [options.onDemoState] 状态演示回调
+ * @param {() => void} [options.onRun] 手动触发流水线
+ * @param {() => void} [options.onStop]
+ * @param {(stage: string, next: object) => void} [options.onStageChange]
+ * @param {(tab: string) => void} [options.onTabChange]
+ * @param {object} [options.settings] 当前设置（用来初始化控件）
  * @returns {HTMLElement|null}
  */
 export function mountPanel(options = {}) {
@@ -261,7 +490,8 @@ export function mountPanel(options = {}) {
 
     makeHeaderDraggable(panel, panel.querySelector('#aw-header'));
     bindEvents(el);
-    switchTab('params');
+    if (options.settings) renderStageCards(el, options.settings);
+    switchTab(options.settings?.ui?.tab ?? 'params');
     applyLayout();
 
     window.addEventListener('resize', onViewportChange);
@@ -360,7 +590,19 @@ const PANEL_HTML = `
         <section class="aw-tab-panel" data-panel="params">
             <div class="aw-note">
                 <b>① 草稿</b> = 酒馆原生生成（用你当前连接）。<br>
-                <b>②③</b> 的接入是下一步，本版本只验证运行环境。
+                <b>② 校验 / ③ 改写</b> 用下面各自选的连接配置，在后台跑，不往聊天记录里写东西。
+            </div>
+
+            <div class="aw-card" id="aw-stage-card-critic">
+                <div class="aw-card-title">② 校验</div>
+                <p class="aw-hint">只找逻辑问题，输出结构化清单；通常开思考。</p>
+                <div id="aw-fields-critic"></div>
+            </div>
+
+            <div class="aw-card" id="aw-stage-card-final">
+                <div class="aw-card-title">③ 改写</div>
+                <p class="aw-hint">按清单改稿，保住原稿文风；通常关思考。</p>
+                <div id="aw-fields-final"></div>
             </div>
 
             <div class="aw-card">
@@ -446,8 +688,8 @@ const PANEL_HTML = `
     </div>
 
     <div class="aw-footer">
-        <button id="aw-run" class="aw-btn aw-btn-primary aw-grow" disabled
-                title="流水线尚未接入">▶ 用最后一条 AI 回复作草稿</button>
+        <button id="aw-run" class="aw-btn aw-btn-primary aw-grow"
+                title="用最后一条 AI 回复作为草稿，跑 ② 校验 与 ③ 改写">▶ 用最后一条 AI 回复作草稿</button>
         <button id="aw-stop" class="aw-btn aw-btn-danger" disabled>⏹ 停止</button>
     </div>
 </div>

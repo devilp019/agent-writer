@@ -1,22 +1,20 @@
 /**
  * Agent Writer - 入口
  *
- * 骨架阶段只做四件事：
- *   1. 挂悬浮球（状态灯 + 面板开关）
- *   2. 挂扩展菜单项（第二入口 + 行内状态）
- *   3. 挂面板（自检 + 状态演示）
- *   4. 把设置落到 settings.json（验证「后端保存」这条链路）
+ * 装配：悬浮球（状态灯）+ 扩展菜单项 + 面板，
+ * 并把酒馆的原生生成事件接到 ②③ 流水线上。
  *
- * ①②③ 流水线在下一步接入。
+ * ① 草稿 = 酒馆原生生成；② 校验 / ③ 改写 = 后台 HTTP 请求，
+ * 不往 chat 里写任何东西，所以不需要把草稿摘出去再放回来。
  */
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.3.4';
+const VERSION = '0.4.0';
 
-import { setState, setDemoHandler } from './state.js?v=0.3.4';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.3.4';
-import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.3.4';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.4.0';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.4.0';
+import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js?v=0.4.0';
 import {
     mountPanel,
     unmountPanel,
@@ -25,8 +23,13 @@ import {
     log,
     setDiagOutput,
     getAutoCheckbox,
-} from './ui/panel.js?v=0.3.4';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.3.4';
+    writeOutput,
+    clearOutputs,
+    setRunning as setPanelRunning,
+} from './ui/panel.js?v=0.4.0';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.4.0';
+import { getSettings, saveSettings } from './config.js?v=0.4.0';
+import { runPipeline, findLastAssistantIndex } from './pipeline.js?v=0.4.0';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -86,32 +89,197 @@ function getContext() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
 }
 
-function getSettings() {
+// getSettings / saveSettings 来自 config.js（那里处理默认值合并与防抖保存）
+
+// ---------------------------------------------------------------------------
+// 触发：酒馆原生生成 → ②③
+// ---------------------------------------------------------------------------
+
+let pendingRewrite = false;
+let preGenSnapshot = null;
+let lastGenerationType = null;
+let runner = null;
+let hooksBound = false;
+
+function describeChat() {
     const context = getContext();
-    if (!context) throw new Error('SillyTavern.getContext() 不可用');
-
-    // extensionSettings 理论上一定存在，但不能指望 —— 它一旦是 undefined，
-    // 下面这行就会抛 TypeError，而且是在最早的启动路径上，直接导致整个 UI 不出现。
-    if (!context.extensionSettings || typeof context.extensionSettings !== 'object') {
-        context.extensionSettings = {};
-    }
-
-    if (!context.extensionSettings[MODULE_NAME]) {
-        context.extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
-    }
-
-    const settings = context.extensionSettings[MODULE_NAME];
-    // 补齐新增的默认键，便于后续版本升级
-    for (const key of Object.keys(DEFAULT_SETTINGS)) {
-        if (!Object.hasOwn(settings, key)) {
-            settings[key] = DEFAULT_SETTINGS[key];
-        }
-    }
-    return settings;
+    const chat = context?.chat ?? [];
+    const last = findLastAssistantIndex(chat);
+    return {
+        chat,
+        index: last,
+        draft: last >= 0 ? String(chat[last]?.mes ?? '') : '',
+    };
 }
 
-function saveSettings() {
-    getContext()?.saveSettingsDebounced?.();
+/** 酒馆生成了新内容才值得跑流水线；纯属重绘就跳过 */
+function hasNewContent() {
+    const { chat, draft } = describeChat();
+    const before = preGenSnapshot;
+    preGenSnapshot = null;
+    if (!before) return true;
+    if (chat.length > before.chatLen) return true;
+    return before.lastAssistantMes !== null && before.lastAssistantMes !== draft;
+}
+
+async function runPipelineNow(source) {
+    if (runner) {
+        log('流水线已在运行，忽略本次触发');
+        return;
+    }
+
+    const settings = getSettings();
+    const { chat, index, draft } = describeChat();
+
+    if (index < 0) {
+        log('没有找到 AI 回复，跳过');
+        return;
+    }
+    if (!draft.trim()) {
+        log('最后一条 AI 回复是空的，跳过');
+        return;
+    }
+
+    const controller = new AbortController();
+    runner = { controller, source };
+    setPanelRunning(true, '⏳ 校验中…');
+    log(`=== 开始流水线（${source}）草稿 ${draft.length} 字 ===`);
+
+    try {
+        const result = await runPipeline({
+            settings,
+            messageIndex: index,
+            draft,
+            signal: controller.signal,
+            onStage: (stage, info) => {
+                const isCritic = stage === 'critic';
+
+                if (info.phase === 'start') {
+                    setState(isCritic ? 'checking' : 'rewriting');
+                    setPanelRunning(true, isCritic ? '⏳ 校验中…' : '⏳ 改写中…');
+                    return;
+                }
+
+                if (info.phase === 'progress') {
+                    // 徽标显示已收字数，不点开面板也能看到它在动
+                    setState(isCritic ? 'checking' : 'rewriting', {
+                        badge: info.text ? String(info.text.length) : null,
+                    });
+                    writeOutput(stage, info.text, info.reasoning);
+                    return;
+                }
+
+                if (info.phase === 'done') {
+                    writeOutput(stage, info.text, info.reasoning);
+                    if (info.retried) {
+                        log(`${isCritic ? '②' : '③'} 换了一种模式重试后成功（${info.mode}）`);
+                    }
+                    if (isCritic && info.parsed) {
+                        log(`② 校出 ${info.parsed.issues?.length ?? 0} 条问题`);
+                    }
+                    return;
+                }
+
+                if (info.phase === 'skipped') {
+                    log(`③ 跳过：${info.reason}`);
+                    return;
+                }
+
+                if (info.phase === 'error') {
+                    log(`${isCritic ? '②' : '③'} 出错：${info.message}`);
+                }
+            },
+        });
+
+        if (!result.ok) {
+            setState('error', { badge: '!' });
+            log(`流水线中断于 ${result.stage}：${result.reason}`);
+            return;
+        }
+
+        if (!result.replaced) {
+            setState('done');
+            log('校验判定无需修改，保留原草稿');
+            return;
+        }
+
+        setState('done');
+        log(`=== 完成：草稿 ${draft.length} 字 → 正文 ${result.finalText.length} 字 ===`);
+    } catch (error) {
+        if (controller.signal.aborted) {
+            setState('idle');
+            log('流水线已停止');
+            return;
+        }
+        setState('error', { badge: '!' });
+        log(`流水线出错：${error?.message ?? error}`);
+        console.error('[AgentWriter] 流水线出错', error);
+    } finally {
+        runner = null;
+        setPanelRunning(false);
+        const settings2 = getSettings();
+        setTimeout(() => {
+            // done / error 态会自己回落，这里只在空闲时校准一下
+            if (!runner) setState(idleState(settings2));
+        }, 4200);
+    }
+}
+
+function stopPipeline() {
+    if (!runner) return;
+    log('请求停止…');
+    try {
+        runner.controller.abort();
+    } catch (e) {
+        console.warn('[AgentWriter] 停止失败', e);
+    }
+}
+
+function bindGenerationHooks() {
+    if (hooksBound) return;
+    const context = getContext();
+    const eventSource = context?.eventSource;
+    const eventTypes = context?.eventTypes;
+    if (!eventSource?.on || !eventTypes) {
+        console.warn('[AgentWriter] 拿不到酒馆事件，自动模式不可用');
+        return;
+    }
+    hooksBound = true;
+
+    eventSource.on(eventTypes.GENERATION_STARTED, (type, _option, dryRun) => {
+        lastGenerationType = type;
+        const settings = getSettings();
+        if (!settings.auto || dryRun) return;
+        if (type === 'continue' || type === 'quiet') return;
+        if (runner) return;
+
+        const { chat, draft } = describeChat();
+        preGenSnapshot = { chatLen: chat.length, lastAssistantMes: findLastAssistantIndex(chat) >= 0 ? draft : null };
+        pendingRewrite = true;
+        setState('drafting');
+        log(`① 酒馆原生生成中（type=${type}）`);
+    });
+
+    eventSource.on(eventTypes.GENERATION_ENDED, () => {
+        const settings = getSettings();
+        if (!settings.auto) return;
+        if (lastGenerationType === 'quiet') return;
+        if (!pendingRewrite) return;
+        pendingRewrite = false;
+        if (runner) return;
+
+        // 等酒馆把楼层渲染完再动它
+        setTimeout(() => {
+            if (!hasNewContent()) {
+                log('本次生成没有产生新内容，跳过流水线');
+                setState(idleState(getSettings()));
+                return;
+            }
+            runPipelineNow('自动');
+        }, 500);
+    });
+
+    log('✓ 已接上 GENERATION_STARTED / GENERATION_ENDED');
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +343,9 @@ function startUI() {
             reportFatal('挂载扩展菜单项', err);
         }
 
-        setState(settings.auto ? 'idle' : 'off');
+        setState(idleState(settings));
         log(`Agent Writer v${VERSION} 就绪（悬浮球 ${fabOk ? '✔' : '✘'} / 菜单项 ${menuOk ? '✔' : '✘'}）`);
+        bindGenerationHooks();
 
         // 两个都没成，说明环境本身有问题，别让用户对着空白界面猜
         if (!fabOk && !menuOk) {
@@ -202,16 +371,32 @@ function mountPanelOnce() {
     }
 
     let el = null;
+    const settings = getSettings();
     try {
         el = mountPanel({
+            settings,
             onAutoChange: (auto) => {
-                const settings = getSettings();
-                settings.auto = !!auto;
-                saveSettings();
-                setState(auto ? 'idle' : 'off');
+                const s = getSettings();
+                s.auto = !!auto;
+                saveSettings({ immediate: true });
+                setState(idleState(s));
                 log(`自动模式：${auto ? '开' : '关'}`);
             },
             onDemoState: (state, detail) => setState(state, detail),
+            onRun: () => {
+                runPipelineNow('手动');
+            },
+            onStop: () => stopPipeline(),
+            onStageChange: (stage, next) => {
+                const s = getSettings();
+                s[stage] = { ...s[stage], ...next };
+                saveSettings();
+            },
+            onTabChange: (tab) => {
+                const s = getSettings();
+                s.ui = { ...s.ui, tab };
+                saveSettings();
+            },
         });
     } catch (err) {
         reportFatal('挂载面板', err);
@@ -226,12 +411,11 @@ function mountPanelOnce() {
     panelMounted = true;
 
     try {
-        const settings = getSettings();
         const autoBox = getAutoCheckbox();
         if (autoBox) autoBox.checked = !!settings.auto;
-        setState(settings.auto ? 'idle' : 'off');
+        setState(idleState(settings));
 
-        log('提示：在「参数」页点「运行自检」可确认运行环境');
+        log('提示：「参数」页可点「运行自检」；「输出」页看 ①②③ 的结果');
 
         if (!settings.diagnosedOnce) {
             settings.diagnosedOnce = true;

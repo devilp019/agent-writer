@@ -77,6 +77,13 @@ export function isBusy() {
     return current === 'drafting' || current === 'checking' || current === 'rewriting';
 }
 
+/** 根据自动模式开关给出闲置时应显示的状态 */
+export function idleState(settings) {
+    const enabled = settings?.enabled !== false;
+    if (!enabled) return 'off';
+    return settings?.auto ? 'idle' : 'off';
+}
+
 /**
  * 切换状态。
  * @param {AwState} state

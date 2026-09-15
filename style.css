@@ -422,6 +422,47 @@
 
 .aw-field > input:focus { border-color: var(--aw-accent-line); }
 
+.aw-field > select {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--aw-surface-2);
+    color: var(--aw-text);
+    border: 1px solid var(--aw-border);
+    border-radius: 8px;
+    padding: 9px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    min-height: 40px;
+}
+
+.aw-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.aw-switch-block {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: 8px;
+}
+
+.aw-switch-block > input { flex-shrink: 0; }
+
+.aw-tip {
+    flex-basis: 100%;
+    font-size: 11px;
+    font-style: normal;
+    color: var(--aw-text-faint);
+    padding-left: 22px;
+}
+
 .aw-btn {
     padding: 9px 14px;
     background: var(--aw-surface);
