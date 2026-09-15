@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.6.2';
+const VERSION = '0.6.3';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.6.2';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.6.2';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.6.2';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.6.3';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.6.3';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.6.3';
 import {
     mountPanel,
     unmountPanel,
@@ -27,11 +27,11 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.6.2';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.6.2';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.6.2';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.6.2';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.6.2';
+} from './ui/panel.js?v=0.6.3';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.6.3';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.6.3';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.6.3';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.6.3';
 
 const MODULE_NAME = 'agent_writer';
 

@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput } from './ui/panel.js?v=0.6.2';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.6.2';
+import { log, setDiagOutput } from './ui/panel.js?v=0.6.3';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.6.3';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -647,7 +647,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.6.2');
+        const mod = await import('./pipeline.js?v=0.6.3');
         snapshot = mod.getLastRequests();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -690,6 +690,153 @@ export async function showLastRequests() {
     return text;
 }
 
+/**
+ * 换渠道专项诊断：比对「酒馆能通的路径」和「扩展正在用的路径」。
+ *
+ * 背景：同一个 key 在酒馆里能通，但扩展直接打 apiurl 却 401。
+ * 这两条路的差别在于：
+ *   - 酒馆路径只传 secret_id，密钥由服务端从 secrets 里取
+ *   - 扩展路径把密钥明文放进 custom_api.key，由 TH 塞进 Authorization 头
+ * 所以要么密钥值不同，要么头没设对。
+ *
+ * 这里把两件事分开测，并把两边的密钥指纹打出来比对（只打指纹，不打印密钥本身）。
+ *
+ * @param {string} [apiUrl]
+ * @param {string} [key]
+ * @param {string} [model]
+ */
+export async function probeChannel(apiUrl, key, model) {
+    const context = ctx();
+    if (!context) {
+        setDiagOutput('getContext() 不可用。');
+        return null;
+    }
+
+    const svc = context.ConnectionManagerRequestService ?? globalThis.ConnectionManagerRequestService;
+    const profile = (() => {
+        try {
+            return svc?.getProfile?.(getDiagProfileId(context));
+        } catch { return null; }
+    })();
+
+    const url = String(apiUrl ?? '').trim() || profile?.['api-url'] || '';
+    const useModel = String(model ?? '').trim() || profile?.model || '';
+    const plainKey = String(key ?? '').trim();
+    const secretId = profile?.['secret-id'] ?? '';
+
+    const out = [];
+    const say = (s) => { out.push(s); setDiagOutput(out.join('\n')); };
+
+    const mask = (v) => {
+        const s = String(v ?? '');
+        if (!s) return '(空)';
+        if (s.length <= 12) return `${s.slice(0, 3)}…${s.slice(-2)}（${s.length} 字符）`;
+        return `${s.slice(0, 6)}…${s.slice(-4)}（${s.length} 字符）`;
+    };
+
+    const hash = async (v) => {
+        try {
+            const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(v)));
+            return [...new Uint8Array(buf)].slice(0, 4).map((b) => b.toString(16).padStart(2, '0')).join('');
+        } catch {
+            return '(算不出)';
+        }
+    };
+
+    say('=== 密钥来源比对 ===');
+    say(`连接配置           ${profile?.name ?? '(无)'}`);
+    say(`api-url            ${url || '(空)'}`);
+    say(`model              ${useModel || '(空)'}`);
+    say(`profile.secret-id  ${secretId || '(无)'}`);
+    say(`面板里填的 key     ${mask(plainKey)}  指纹 ${await hash(plainKey)}`);
+    say('');
+
+    // 从酒馆 secrets 里取出服务端实际会用的值，只用来算指纹
+    let serverKey = null;
+    try {
+        const resp = await fetch('/api/secrets/find', {
+            method: 'POST',
+            headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: 'api_key_custom', id: secretId || undefined }),
+        });
+        if (resp.ok) {
+            serverKey = (await resp.json())?.value ?? null;
+        } else {
+            say(`读酒馆密钥失败：HTTP ${resp.status}（可能 allowKeysExposure 没开）`);
+        }
+    } catch (e) {
+        say(`读酒馆密钥出错：${e?.message}`);
+    }
+
+    if (serverKey) {
+        say(`酒馆里的密钥       ${mask(serverKey)}  指纹 ${await hash(serverKey)}`);
+        say(`⇒ 两者${serverKey === plainKey ? '一致' : '不一致 —— 若是后者，这就是 401 的原因'}`);
+    } else {
+        say('酒馆里的密钥       读不到（只影响比对，不影响下面的直连测试）');
+    }
+    say('');
+
+    const messages = [{ role: 'user', content: 'Say OK' }];
+
+    async function attempt(label, body) {
+        say(`${label}`);
+        try {
+            const resp = await fetch('/api/backends/chat-completions/generate', {
+                method: 'POST',
+                headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const text = await resp.text();
+            let parsed = null;
+            try { parsed = JSON.parse(text); } catch { /* 非 JSON */ }
+
+            if (parsed?.error) {
+                const msg = typeof parsed.error === 'object'
+                    ? (parsed.error.message ?? JSON.stringify(parsed.error))
+                    : String(parsed.error);
+                say(`   ✘ HTTP ${resp.status}  ${msg}`);
+                return false;
+            }
+            const content = parsed?.choices?.[0]?.message?.content ?? parsed?.choices?.[0]?.text ?? parsed?.content ?? '';
+            say(`   ✔ HTTP ${resp.status}  返回: ${JSON.stringify(String(content).slice(0, 60))}`);
+            return true;
+        } catch (e) {
+            say(`   抛错: ${e?.message}`);
+            return false;
+        } finally {
+            say('');
+        }
+    }
+
+    const base = {
+        stream: false,
+        messages,
+        model: useModel,
+        chat_completion_source: 'custom',
+        custom_url: url,
+        max_tokens: 16,
+        use_sysprompt: true,
+    };
+
+    say('=== 直连测试 ===');
+    if (secretId) {
+        await attempt('① 服务端取密钥（secret_id）', { ...base, secret_id: secretId });
+    }
+    if (plainKey) {
+        await attempt('② 面板明文密钥（key）', { ...base, key: plainKey });
+    }
+    if (serverKey && serverKey !== plainKey) {
+        await attempt('③ 酒馆里那个密钥的值', { ...base, key: serverKey });
+    }
+
+    say('判断方法：');
+    say('  · ① 通、② 不通 ⇒ 面板里填的 key 和酒馆里的不是同一个值');
+    say('  · ③ 通 ⇒ 同上');
+    say('  · ①② 都不通 ⇒ 这个 api-url 不接受这两个密钥');
+    log('换渠道诊断完成');
+    return out.join('\n');
+}
+
 /** 挂到 window，方便不开面板直接调用 */
 export function exposeGlobals() {
     globalThis.awDiagnose = diagnose;
@@ -697,4 +844,5 @@ export function exposeGlobals() {
     globalThis.awProbeSecret = probeSecret;
     globalThis.awProbeShape = probeShape;
     globalThis.awLastRequests = showLastRequests;
+    globalThis.awProbeChannel = probeChannel;
 }

@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.6.2';
+import { demoState } from '../state.js?v=0.6.3';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -413,6 +413,10 @@ function bindEvents(el) {
     el.querySelector('#aw-diag-secret')?.addEventListener('click', () => {
         window.awProbeSecret?.();
     });
+    el.querySelector('#aw-diag-channel')?.addEventListener('click', () => {
+        const get = (n) => globalThis.document.getElementById(n)?.value ?? '';
+        window.awProbeChannel?.(get('aw-critic-apiurl'), get('aw-critic-apikey'), get('aw-critic-model'));
+    });
     el.querySelector('#aw-diag-requests')?.addEventListener('click', () => {
         window.awLastRequests?.();
     });
@@ -680,6 +684,7 @@ const PANEL_HTML = `
                     <button id="aw-diag-secret" class="aw-btn">密钥来源对照</button>
                     <button id="aw-diag-copy" class="aw-btn">复制结果</button>
                     <button id="aw-diag-requests" class="aw-btn">查看实际请求体</button>
+                    <button id="aw-diag-channel" class="aw-btn">换渠道诊断</button>
                 </div>
                 <label class="aw-field">
                     <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>
