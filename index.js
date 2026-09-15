@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.7.0';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.7.0';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.7.0';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.8.0';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.0';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.0';
 import {
     mountPanel,
     unmountPanel,
@@ -27,11 +27,12 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-} from './ui/panel.js?v=0.7.0';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.7.0';
-import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.7.0';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.7.0';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.7.0';
+} from './ui/panel.js?v=0.8.0';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.0';
+import { getSettings, saveSettings, DEFAULT_CRITIC_PROMPT, DEFAULT_REWRITE_PROMPT } from './config.js?v=0.8.0';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.0';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.0';
+import * as notice from './notice.js?v=0.8.0';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -200,6 +201,7 @@ async function runPipelineNow(source) {
 
                 if (info.phase === 'error') {
                     log(`${isCritic ? '②' : '③'} 出错：${info.message}`);
+                    notice.error(`${isCritic ? '② 校验' : '③ 改写'}出错：${info.message}`);
                 }
             },
         });
@@ -207,6 +209,11 @@ async function runPipelineNow(source) {
         if (!result.ok) {
             setState('error', { badge: '!' });
             log(`流水线中断于 ${result.stage}：${result.reason}`);
+            // 光写日志没用 —— 悬浮球上只有一个「!」，不点开面板看不见原因
+            notice.error(
+                `流水线中断（${result.stage === 'critic' ? '② 校验' : '③ 改写'}）\n${result.reason}`,
+                'Agent Writer 已中止',
+            );
             return;
         }
 
@@ -227,6 +234,7 @@ async function runPipelineNow(source) {
         setState('error', { badge: '!' });
         log(`流水线出错：${error?.message ?? error}`);
         console.error('[AgentWriter] 流水线出错', error);
+        notice.fail('流水线', error);
     } finally {
         runner = null;
         setPanelRunning(false);
@@ -389,6 +397,11 @@ function checkTavernHelper(settings) {
     if (!probe.ok) {
         log(`✘ ${probe.missing.join('；')}`);
         console.warn('[AgentWriter] 缺少酒馆助手，②③ 无法运行。请安装并启用 JS-Slash-Runner 扩展。');
+        // 这是硬依赖：没有它 ②③ 一次都跑不了，必须在界面上说清楚
+        notice.error(
+            `缺少酒馆助手（JS-Slash-Runner），②③ 无法运行：\n${probe.missing.join('\n')}`,
+            'Agent Writer 缺依赖',
+        );
         return;
     }
 
@@ -400,6 +413,10 @@ function checkTavernHelper(settings) {
     if (!settings.final.slotName) missing.push('③ 改写');
     if (missing.length) {
         log(`⚠ ${missing.join(' / ')} 还没填注入槽位条目名，请到「参数」页设置`);
+        notice.warn(
+            `${missing.join(' / ')} 还没填注入槽位条目名，流水线会在启动时直接失败。\n请到面板「参数」页填写。`,
+            'Agent Writer 配置不完整',
+        );
     }
 }
 

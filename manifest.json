@@ -4,8 +4,8 @@
     "js": "index.js",
     "css": "style.css",
     "author": "agent-writer",
-    "version": "0.7.0",
-    "homePage": "https://github.com/REPLACE-ME/agent-writer",
+    "version": "0.8.0",
+    "homePage": "https://github.com/devilp019/agent-writer",
     "auto_update": false,
     "minimum_client_version": "1.18.0",
     "hooks": {
