@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.8';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.8';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.9';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.9';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.8');
+        const mod = await import('./pipeline.js?v=0.8.9');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.8 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.9 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.8');
+        const mod = await import('./tavern.js?v=0.8.9');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.8 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.9 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1038,7 +1038,7 @@ export async function probeExact(settings) {
 
     let buildCustomApi;
     try {
-        ({ buildCustomApi } = await import('./tavern.js?v=0.8.8'));
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.9'));
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
         return null;
@@ -1055,6 +1055,7 @@ export async function probeExact(settings) {
     const useStream = stage.useStream !== false;
 
     say('=== 用真实参数复现 ② 的请求 ===');
+    say(`（扩展版本 ${VERSION ?? '?'}）`);
     say('');
     say(`API 地址     ${customApi.apiurl ?? '(用当前连接)'}`);
     say(`模型         ${customApi.model ?? '(不覆盖)'}`);
