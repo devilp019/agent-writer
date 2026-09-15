@@ -412,7 +412,38 @@ choices[0].message.content      // ← 顶层没有 choices，拿到空字符串
 
 **所以 Cline 只能放在②这类本来就要开思考的阶段。** ③ 必须靠「关思考」才有好文笔，放 Cline 会得到边写边盘算剧情的正文 —— 正是要避免的那种。
 
-### 4. 那个模型名
+### 4. 附加字段必须写**能解析的** JSON —— 「加尾逗号绕过过滤」是错的
+
+流传过一个做法：把附加字段写成不严格的 JSON（故意留尾逗号），
+据说能让酒馆跳过解析、把字段原样转发给上游。
+
+**实测是反的，而且这个做法会让所有附加字段静默失效。**
+
+酒馆后端对 custom 源的处理（`src/endpoints/backends/chat-completions.js:2409`）：
+
+```js
+bodyParams = { logprobs, top_logprobs };
+mergeObjectWithYaml(bodyParams, request.body.custom_include_body);   // ← 合并
+...
+requestBody = { model, messages, ..., ...bodyParams };               // ← bodyParams 原样展开
+```
+
+而 `mergeObjectWithYaml` 内部是 try/catch：
+
+| 情况 | 行为 |
+|---|---|
+| 解析成功 | `Object.assign` → 字段**全部**进请求体 |
+| 解析失败 | catch 里什么都不做 → **一个字段都不加** |
+
+**它是合并，不是过滤。** 不认识的字段（例如 `providerOptions`）根本不会被丢掉，
+所以不需要任何「绕过」技巧。而尾逗号让解析失败，结果：
+
+- 带尾逗号 → 上游回 `{"error":"Error parsing request"}`，或者附加字段全部消失
+- 去掉尾逗号 → 立刻正常
+
+写严格 JSON 就行。
+
+### 5. 那个模型名
 
 `cline-pass/deepseek-v4-flash` 可用（Cline 侧实际路由到 `vmc/deepseek-v4-flash-contributor-fallbacks`）。
 `cline-pass/deepseek-v4.1-flash` 这个写法**没验证过**，别想当然。

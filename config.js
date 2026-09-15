@@ -129,13 +129,28 @@ function stageDefaults(overrides) {
         /**
          * 附加请求体字段的**原文**（面板里那段的原始文本，一字不改）。
          *
-         * 和 bodyFields 的关系：
-         *   bodyFields    —— 解析后的对象。JSON 写不严格时解析失败，这里是空的。
-         *   bodyFieldsRaw —— 原文。无论严格与否都留着，真正发出去的是它。
+         * 会走 custom_include_body 原样发给酒馆。
          *
-         * 为什么必须进 schema：它会落盘到 settings.json。不写在这里的话，
-         * 一旦某个环节用 DEFAULT_SETTINGS 去构建阶段对象，原文就会丢 ——
-         * 表现就是「每次装完都得重新填附加参数」。实测踩过。
+         * ⚠️ 必须写**能解析的 JSON/YAML**。
+         *
+         * 有过一个流传的做法：故意写不严格的 JSON（加尾逗号），
+         * 据说能让酒馆跳过解析、把字段原样转发出去。**实测是反的。**
+         *
+         * 酒馆后端（src/endpoints/backends/chat-completions.js:2409）对 custom
+         * 源做的是：先建一个 bodyParams（只有 logprobs / top_logprobs），
+         * 再用 mergeObjectWithYaml 把 custom_include_body 合并进去，
+         * 最后 `requestBody = { model, messages, ..., ...bodyParams }`。
+         *
+         * 而 mergeObjectWithYaml 内部是 try/catch：
+         *   解析成功 → Object.assign，字段全部进请求体
+         *   解析失败 → catch 里什么都不做，**一个字段都不加**
+         *
+         * 也就是说它是**合并、不是过滤** —— 不认识的字段不会被丢掉，
+         * 所以根本不需要「绕过解析」这个技巧。
+         * 加了尾逗号反而让所有附加字段静默失效（实测：带尾逗号时上游回
+         * "Error parsing request"；去掉尾逗号立刻正常）。
+         *
+         * 所以写严格 JSON 就行。
          */
         bodyFieldsRaw: '',
 
