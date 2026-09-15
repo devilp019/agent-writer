@@ -1,0 +1,20 @@
+{
+    "display_name": "Agent Writer",
+    "loading_order": 20,
+    "js": "index.js",
+    "css": "style.css",
+    "author": "agent-writer",
+    "version": "0.1.0",
+    "homePage": "https://github.com/REPLACE-ME/agent-writer",
+    "auto_update": false,
+    "minimum_client_version": "1.18.0",
+    "hooks": {
+        "activate": "onActivate",
+        "install": "onInstall",
+        "update": "onUpdate",
+        "enable": "onEnable",
+        "disable": "onDisable",
+        "delete": "onDelete",
+        "clean": "onClean"
+    }
+}
