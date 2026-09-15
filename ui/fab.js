@@ -85,10 +85,19 @@ function makeDraggable(el, onTap) {
     let originTop = 0;
     let dragging = false;
     let moved = false;
+    let lastTouchAt = 0;
 
     const onDown = (event) => {
-        if (event.button !== undefined && event.button !== 0 && !event.touches) return;
-        const point = event.touches ? event.touches[0] : event;
+        const isTouch = !!event.touches;
+        if (isTouch) {
+            lastTouchAt = Date.now();
+        } else if (Date.now() - lastTouchAt < 700) {
+            // 触摸结束后浏览器会补发一对合成鼠标事件（mousedown/mouseup）。
+            // 不挡住的话一次点击会走两遍 onTap，点开又立刻关掉，看起来就是"点了没反应"。
+            return;
+        }
+        if (event.button !== undefined && event.button !== 0 && !isTouch) return;
+        const point = isTouch ? event.touches[0] : event;
         dragging = true;
         moved = false;
         startX = point.clientX;

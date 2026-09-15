@@ -35,6 +35,27 @@ let fallbackTimer = null;
 const listeners = new Set();
 
 /**
+ * 状态演示处理器。
+ * 由 panel.js 注册，让面板的演示按钮能驱动状态机，
+ * 同时避免 panel.js 反向 import index.js 造成循环依赖。
+ * @type {((state: AwState, detail: {badge?: string}|null) => void)|null}
+ */
+let demoHandler = null;
+
+export function setDemoHandler(fn) {
+    demoHandler = fn;
+}
+
+/** 供面板演示按钮调用 */
+export function demoState(state, detail = null) {
+    if (demoHandler) {
+        demoHandler(state, detail);
+        return;
+    }
+    setState(state, detail);
+}
+
+/**
  * 订阅状态变化。
  * @param {(state: AwState, detail: {badge?: string}) => void} fn
  * @returns {() => void} 取消订阅

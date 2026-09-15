@@ -10,9 +10,9 @@
  * ①②③ 流水线在下一步接入。
  */
 
-import { setState } from './state.js';
+import { setState, setDemoHandler } from './state.js';
 import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js';
+import { mountMenuItem, unmountMenuItem, isMenuItemMounted, describeMenuContainer } from './ui/menu.js';
 import {
     mountPanel,
     unmountPanel,
@@ -23,9 +23,10 @@ import {
     getAutoCheckbox,
 } from './ui/panel.js';
 import { diagnose, probe, exposeGlobals } from './diagnostics.js';
+import * as notice from './notice.js';
 
 const MODULE_NAME = 'agent_writer';
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 
 const DEFAULT_SETTINGS = Object.freeze({
     version: 1,
@@ -71,17 +72,55 @@ let uiStarted = false;
 let panelMounted = false;
 
 /**
+ * 悬浮球和菜单项共用的开关动作。
+ *
+ * 这里包一层 try/catch 并对失败给出可见反馈 —— 你看到的"点击有反馈但没面板"，
+ * 之前就是被静默吞掉的异常，界面上完全看不出来。
+ */
+function safeToggle() {
+    try {
+        if (!document.getElementById('aw-panel')) {
+            const mounted = mountPanelOnce();
+            if (!mounted) {
+                notice.error('面板挂载失败，详细原因见控制台', 'Agent Writer 出错');
+                return;
+            }
+            // 刚挂上就是关闭态，直接显示
+            togglePanel();
+            return;
+        }
+        togglePanel();
+    } catch (err) {
+        notice.fail('打开面板', err);
+    }
+}
+
+/**
  * 挂载悬浮球和菜单项。这两件事在加载期就能做，不依赖 UI 就绪。
+ *
+ * 关键：分成三个独立 try，任何一环炸掉都不能连累其它两环。
+ * 之前整块共用一个 try，结果球挂上了、后面的静默失败，表现就是"只有一个球"。
  */
 function startUI() {
     const settings = getSettings();
     exposeGlobals();
+    setDemoHandler((state, detail) => setState(state, detail));
 
     if (!uiStarted) {
         uiStarted = true;
-        const toggle = () => togglePanel();
-        mountFab(toggle);
-        mountMenuItem(toggle);
+
+        try {
+            mountFab(safeToggle);
+        } catch (err) {
+            notice.fail('挂载悬浮球', err);
+        }
+
+        try {
+            mountMenuItem(safeToggle);
+        } catch (err) {
+            notice.fail('挂载扩展菜单项', err);
+        }
+
         setState(settings.auto ? 'idle' : 'off');
         log(`Agent Writer v${VERSION} 就绪`);
     }
@@ -93,16 +132,19 @@ function startUI() {
  *
  * 这个函数必须和 startUI() 分开：之前它被塞在带 `started` 闸门的 boot() 里，
  * 而 onEnable 钩子会在加载期先跑一次，把闸门置位，导致随后 APP_READY 的回调
- * 直接 return —— 面板永远不会被创建，表现就是「悬浮球能点但点不出来」。
+ * 直接 return —— 面板永远不会被创建。
+ *
+ * @returns {boolean} 是否已挂载
  */
 function mountPanelOnce() {
     if (document.getElementById('aw-panel')) {
         panelMounted = true;
-        return;
+        return true;
     }
 
+    let el = null;
     try {
-        const el = mountPanel({
+        el = mountPanel({
             onAutoChange: (auto) => {
                 const settings = getSettings();
                 settings.auto = !!auto;
@@ -112,14 +154,19 @@ function mountPanelOnce() {
             },
             onDemoState: (state, detail) => setState(state, detail),
         });
+    } catch (err) {
+        notice.fail('挂载面板', err);
+        return false;
+    }
 
-        if (!el) {
-            console.error('[AgentWriter] 面板挂载返回空');
-            return;
-        }
+    if (!el) {
+        notice.error('面板模板解析失败，挂载返回空', 'Agent Writer 出错');
+        return false;
+    }
 
-        panelMounted = true;
+    panelMounted = true;
 
+    try {
         const settings = getSettings();
         const autoBox = getAutoCheckbox();
         if (autoBox) autoBox.checked = !!settings.auto;
@@ -130,11 +177,14 @@ function mountPanelOnce() {
         if (!settings.diagnosedOnce) {
             settings.diagnosedOnce = true;
             saveSettings();
-            diagnose().catch((error) => console.error('[AgentWriter] 自检失败', error));
+            diagnose().catch((err) => console.error('[AgentWriter] 自检失败', err));
         }
-    } catch (error) {
-        console.error('[AgentWriter] 面板挂载失败', error);
+    } catch (err) {
+        // 面板本体已经挂上，这里出错不算致命
+        console.error('[AgentWriter] 面板初始化后置步骤出错', err);
     }
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,28 +251,29 @@ function teardown() {
 
 let retryTimer = null;
 
-function schedulePanelMount(reason) {
-    mountPanelOnce();
-    if (panelMounted) return;
+function schedulePanelMount() {
+    if (mountPanelOnce()) return;
 
     // 面板还没挂上（还没到 APP_READY），后台重试，保证它一定会出现
     if (retryTimer) return;
+    let attempts = 0;
     retryTimer = setInterval(() => {
-        mountPanelOnce();
-        if (panelMounted) {
+        attempts++;
+        if (mountPanelOnce()) {
             clearInterval(retryTimer);
             retryTimer = null;
-            console.log(`[AgentWriter] 面板已挂载（${reason}）`);
+            console.log(`[AgentWriter] 面板已挂载（第 ${attempts} 次重试）`);
+            return;
+        }
+        if (attempts >= 50) {
+            clearInterval(retryTimer);
+            retryTimer = null;
+            notice.error(
+                '面板在 30 秒内未能挂载。悬浮球仍可点击，点一下会再试一次。',
+                'Agent Writer 出错',
+            );
         }
     }, 600);
-
-    // 30 秒后放弃重试，但悬浮球点击时仍会就地补挂
-    setTimeout(() => {
-        if (retryTimer) {
-            clearInterval(retryTimer);
-            retryTimer = null;
-        }
-    }, 30000);
 }
 
 function onAppReady() {
@@ -245,7 +296,7 @@ try {
 } catch (error) {
     console.error('[AgentWriter] UI 启动失败', error);
 }
-schedulePanelMount('启动兜底');
+schedulePanelMount();
 
 window.addEventListener('pagehide', teardown);
 

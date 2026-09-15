@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { setState } from '../state.js';
+import { demoState } from '../state.js';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -236,7 +236,7 @@ function bindEvents(el) {
  */
 export function mountPanel(options = {}) {
     if (!options.onDemoState) {
-        options.onDemoState = (state, detail) => setState(state, detail);
+        options.onDemoState = (state, detail) => demoState(state, detail);
     }
     mountOptions = options;
 

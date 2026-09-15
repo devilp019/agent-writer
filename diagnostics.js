@@ -8,6 +8,7 @@
  */
 
 import { log, setDiagOutput } from './ui/panel.js';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -80,8 +81,15 @@ async function collectEnvironment(context) {
     out.push('');
     out.push('=== 界面挂载点 ===');
     out.push(line('#extensionsMenu', ok(document.getElementById('extensionsMenu'))));
-    out.push(line('#aw-fab', ok(document.getElementById('aw-fab'))));
-    out.push(line('#aw-panel', ok(document.getElementById('aw-panel'))));
+    out.push(line('菜单容器探测', describeMenuContainer()));
+    out.push(line('#aw-menu-item 已挂载', ok(isMenuItemMounted())));
+    out.push(line('#aw-fab（悬浮球）', ok(document.getElementById('aw-fab'))));
+    out.push(line('  位置', document.getElementById('aw-fab')?.style?.left
+        ? `${document.getElementById('aw-fab').style.left} / ${document.getElementById('aw-fab').style.top}`
+        : '(未定位)'));
+    out.push(line('#aw-panel（面板）', ok(document.getElementById('aw-panel')) + (document.getElementById('aw-panel') ? '' : '  ← 点悬浮球应能补挂')));
+    out.push(line('  display', document.getElementById('aw-panel')?.style?.display || '(空)'));
+    out.push(line('aw 调试入口', ok(globalThis.aw)));
     out.push(line('prefers-reduced-motion', window.matchMedia('(prefers-reduced-motion: reduce)').matches ? '是（动画已降级）' : '否'));
     out.push(line('视口', `${window.innerWidth}x${window.innerHeight} @${window.devicePixelRatio}x`));
 

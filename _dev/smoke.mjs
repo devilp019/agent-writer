@@ -191,8 +191,31 @@ doc.body = doc;
 doc.documentElement = doc;
 doc.createElement = (tag) => new El(tag);
 doc.getElementById = (id) => [...doc.walk()].find((el) => el.attributes.id === id) ?? null;
+doc.querySelector = (sel) => [...doc.walk()].find((el) => el !== doc && matches(el, sel)) ?? null;
+doc.querySelectorAll = (sel) => [...doc.walk()].filter((el) => el !== doc && matches(el, sel));
 doc.addEventListener = () => {};
 doc.removeEventListener = () => {};
+
+// document 级别的 touch/mouse 监听要能触发（fab 的拖拽逻辑挂在 document 上）
+const docListeners = {};
+doc.addEventListener = (type, fn) => { (docListeners[type] ??= []).push(fn); };
+doc.removeEventListener = (type, fn) => {
+    const list = docListeners[type];
+    if (!list) return;
+    const i = list.indexOf(fn);
+    if (i >= 0) list.splice(i, 1);
+};
+function fireDoc(type, event = {}) {
+    const ev = {
+        type,
+        target: doc,
+        cancelable: true,
+        preventDefault() {},
+        stopPropagation() {},
+        ...event,
+    };
+    for (const fn of [...(docListeners[type] ?? [])]) fn(ev);
+}
 
 globalThis.document = doc;
 globalThis.window = globalThis;
@@ -213,6 +236,14 @@ globalThis.localStorage = {
     getItem(k) { return this._d[k] ?? null; },
     setItem(k, v) { this._d[k] = String(v); },
     removeItem(k) { delete this._d[k]; },
+};
+
+// MutationObserver 桩：观察不做事，只保证接口存在（真实触发逻辑在酒馆里验证）
+globalThis.MutationObserver = class {
+    constructor(callback) { this.callback = callback; }
+    observe() {}
+    disconnect() {}
+    takeRecords() { return []; }
 };
 globalThis.console.log = globalThis.console.log.bind(globalThis);
 
@@ -330,6 +361,98 @@ results.push(['回到待命后状态隐藏', statusEl.dataset.active === 'false'
 
 item.fire('click');
 results.push(['点菜单项调用 onToggle', toggled === 1]);
+
+// ---------------------------------------------------------------------------
+// 用例 6：触摸点击不能被合成鼠标事件触发两次
+//
+// 这是"点击有反馈但面板不出来"的真凶：触摸结束后浏览器补发 mousedown/mouseup，
+// 一次点击走两遍 onTap，点开又立刻关掉。
+// ---------------------------------------------------------------------------
+
+fabApi.unmountFab();
+let taps = 0;
+fabApi.mountFab(() => { taps++; });
+const fab2 = document.getElementById('aw-fab');
+
+const syntheticTouch = () => ({
+    touches: [{ clientX: 100, clientY: 100 }],
+    changedTouches: [{ clientX: 100, clientY: 100 }],
+    cancelable: true,
+});
+const syntheticMouse = (type) => ({ button: 0, clientX: 100, clientY: 100, type });
+
+// 一次完整触摸：touchstart -> touchend -> 浏览器补发 mousedown -> mouseup
+fab2.fire('touchstart', syntheticTouch());
+fireDoc('touchend', { touches: [], changedTouches: [{ clientX: 100, clientY: 100 }] });
+results.push(['触摸点击触发一次 onTap', taps === 1]);
+
+fab2.fire('mousedown', syntheticMouse('mousedown'));
+fireDoc('mouseup', { button: 0 });
+results.push(['合成鼠标事件被忽略，onTap 仍为 1', taps === 1]);
+
+// 合成事件被忽略后，dragging 必须是干净的，否则后续真实交互会失灵
+results.push(['合成事件未残留 is-dragging', !fab2.classList.contains('is-dragging')]);
+results.push(['document 上没残留 mouseup 监听', (docListeners.mouseup ?? []).length === 0]);
+results.push(['document 上没残留 touchmove 监听', (docListeners.touchmove ?? []).length === 0]);
+
+// 纯鼠标环境（电脑）仍要能点：等过 700ms 的触摸抑制窗口
+await new Promise((resolve) => setTimeout(resolve, 720));
+fab2.fire('mousedown', syntheticMouse('mousedown'));
+fireDoc('mouseup', { button: 0 });
+results.push(['鼠标点击仍然有效（taps === 2）', taps === 2]);
+
+// 拖拽仍要能用：按下后移动超过阈值，松手应吸附而不是触发 onTap
+const tapsBeforeDrag = taps;
+fab2.fire('mousedown', syntheticMouse('mousedown'));
+fireDoc('mousemove', { clientX: 160, clientY: 140 });
+fireDoc('mouseup', { button: 0 });
+results.push(['拖拽不触发 onTap', taps === tapsBeforeDrag]);
+results.push(['拖拽后位置被保存', !!globalThis.localStorage.getItem('aw_fab_pos_v1')]);
+
+// ---------------------------------------------------------------------------
+// 用例 7：菜单容器探测的多路回退
+// ---------------------------------------------------------------------------
+
+// 换成没有 #extensionsMenu 的场景，只有已知菜单项，应能反推父容器
+menu.unmountMenuItem();
+extMenu.remove();
+
+const fakeParent = document.createElement('div');
+fakeParent.className = 'extensionsMenu';
+const knownItem = document.createElement('div');
+knownItem.className = 'list-group-item';
+knownItem.textContent = '变量管理器';
+fakeParent.appendChild(knownItem);
+doc.appendChild(fakeParent);
+
+menu.mountMenuItem(() => {});
+results.push(['无 #extensionsMenu 时按已知项反推容器', !!document.getElementById('aw-menu-item')]);
+results.push(['菜单项挂在反推出的容器里',
+    document.getElementById('aw-menu-item')?.parentElement === fakeParent]);
+results.push(['容器探测可报告来源', menu.describeMenuContainer().includes('已找到')]);
+results.push(['菜单项挂载状态可查询', menu.isMenuItemMounted() === true]);
+
+// 容器被重建后应自动补挂（MutationObserver 路径在本桩里不触发，这里直接验证 ensureMounted 的幂等）
+menu.mountMenuItem(() => {});
+const all = document.querySelectorAll('#aw-menu-item');
+results.push(['重复挂载不产生重复菜单项', all.length === 1]);
+
+// ---------------------------------------------------------------------------
+// 用例 8：失败必须可见（notice 回退路径）
+// ---------------------------------------------------------------------------
+
+const notice = await import('../notice.js');
+results.push(['无 toastr 时 notice 不抛异常', (() => {
+    try {
+        notice.error('测试消息');
+        return true;
+    } catch {
+        return false;
+    }
+})()]);
+results.push(['notice 渲染出可见提示元素', !!document.getElementById('aw-toast')]);
+results.push(['提示元素带上了消息文本',
+    document.getElementById('aw-toast')?.textContent.includes('测试消息')]);
 
 // ---------------------------------------------------------------------------
 // 汇总
