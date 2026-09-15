@@ -289,11 +289,22 @@ export async function tavernGenerate({ stage, generationId, signal, onProgress }
     const ctx = settingsApi();
 
     const customApi = {};
-    if (stage.proxyPreset) {
+
+    // 换渠道有两条路，直接地址优先。
+    //
+    // 为什么不用 proxy_preset 打头：酒馆的代理预设是挂在具体厂商下面的
+    // （DeepSeek / Gemini 等），只覆盖该厂商的 base url，没法用来指向
+    // Cline 这类 OpenAI 兼容的自定义端点。apiUrl + apiKey 才是通用的。
+    if (stage.apiUrl) {
+        customApi.apiurl = String(stage.apiUrl).trim();
+        // source 必须显式给 'custom'，否则会落到 'openai' 的协议分支上
+        customApi.source = 'custom';
+        if (stage.apiKey) customApi.key = String(stage.apiKey).trim();
+    } else if (stage.proxyPreset) {
         customApi.proxy_preset = String(stage.proxyPreset).trim();
-        // proxy_preset 只覆盖 url/key，source 要自己给，否则 provider 私有字段不生效
         customApi.source = 'custom';
     }
+
     if (stage.model) customApi.model = stage.model;
     if (Number.isFinite(Number(stage.temperature))) customApi.temperature = Number(stage.temperature);
     if (Number.isFinite(Number(stage.maxTokens)) && Number(stage.maxTokens) > 0) {

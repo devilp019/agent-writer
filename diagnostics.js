@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput } from './ui/panel.js?v=0.6.0';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.6.0';
+import { log, setDiagOutput } from './ui/panel.js?v=0.6.1';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.6.1';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -647,7 +647,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.6.0');
+        const mod = await import('./pipeline.js?v=0.6.1');
         snapshot = mod.getLastRequests();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);

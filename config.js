@@ -94,8 +94,20 @@ function stageDefaults(overrides) {
          */
         slotName: '',
 
-        /** 引用哪个酒馆代理预设来换渠道；空 = 用当前连接 */
+        /**
+         * 换渠道（三选一，优先级从高到低）：
+         *   1. apiUrl + apiKey —— 直接指定地址和密钥，最通用
+         *   2. proxyPreset     —— 酒馆的「代理预设」
+         *   3. 都不填          —— 用当前连接
+         *
+         * 注意 proxyPreset 的局限：酒馆的代理预设是**挂在具体厂商下面的**
+         * （DeepSeek / Gemini 等），不是给 OpenAI 兼容自定义源用的。
+         * 要指向 Cline 这类自定义端点，用 apiUrl + apiKey。
+         */
+        apiUrl: '',
+        apiKey: '',
         proxyPreset: '',
+
         /** 覆盖模型名；空 = 不覆盖 */
         model: '',
 

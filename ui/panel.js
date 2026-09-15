@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.6.0';
+import { demoState } from '../state.js?v=0.6.1';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -50,9 +50,21 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         </label>
 
         <label class="aw-field">
-            <span>渠道（酒馆代理预设）</span>
+            <span>换渠道：API 地址（留空 = 用当前连接）</span>
+            <input type="text" id="${id('apiurl')}" value="${esc(s.apiUrl ?? '')}" placeholder="例如 https://api.cline.bot/api/v1">
+            <em class="aw-tip">指向 OpenAI 兼容端点。填了它就用这个地址发请求，下面两项都不用管。</em>
+        </label>
+
+        <label class="aw-field">
+            <span>换渠道：API 密钥</span>
+            <input type="password" id="${id('apikey')}" value="${esc(s.apiKey ?? '')}" placeholder="sk-...">
+            <em class="aw-tip">明文存在扩展设置里。不分享设置的话只影响你自己。</em>
+        </label>
+
+        <label class="aw-field">
+            <span>换渠道：酒馆代理预设（多数情况下用不了，见下）</span>
             <select id="${id('proxy')}">${options.join('')}</select>
-            <em class="aw-tip">换渠道用它；留空则用当前连接。代理预设要在酒馆里先建好。</em>
+            <em class="aw-tip">酒馆的代理预设是挂在具体厂商下面的（DeepSeek / Gemini 等），只换该厂商的 base url，没法指向 Cline 这类自定义端点。地址+密钥填了的话这一项会被忽略。</em>
         </label>
 
         <label class="aw-field">
@@ -91,6 +103,8 @@ function readStage(el, stage, current) {
     const next = { ...current };
 
     next.slotName = (get('slot')?.value ?? '').trim();
+    next.apiUrl = (get('apiurl')?.value ?? '').trim();
+    next.apiKey = (get('apikey')?.value ?? '').trim();
     next.proxyPreset = get('proxy')?.value ?? '';
     next.model = (get('model')?.value ?? '').trim();
     next.temperature = parseFloat(get('temp')?.value) || current.temperature;
