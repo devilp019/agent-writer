@@ -323,23 +323,48 @@ NUL 字节和 `U+FFFD` 编码损坏四种情况。另外 `Get-Content` / `Set-Co
 
 这几条都是直连探针实测出来的，不是推测。留着免得重复踩。
 
-### 1. 那个 401 至少对应三种原因，先别换 key
+### 1. 401 的真正原因：`custom_api.key` 这条路送出去的凭据不对
 
+**已修（0.8.3）。** 记在这里是因为排查过程绕了很多弯，值得留下。
+
+同一个 key、同一个端点，用面板的「换渠道诊断」并排跑两种形状：
+
+| 形状 | 怎么送凭据 | 结果 |
+|---|---|---|
+| A | `custom_api.key` | `HTTP 400 Unauthorized: … re-authenticate your Cline account` |
+| B | 顶层 `custom_include_headers` | `HTTP 200` |
+
+读 TavernHelper 源码确认了机制（`src/function/generate/responseGenerator.ts:190`）：
+
+```js
+if (customApi.apiurl) {
+  generateData.reverse_proxy  = normalizedApiUrl;
+  generateData.proxy_password = customApi.key || '';   // ← 对 custom 源不起作用
+  if (chat_completion_source === 'custom') {
+    generateData.custom_url = normalizedApiUrl;
+    if (customApi.key) {
+      generateData.custom_include_headers =
+        overrideCustomAuthorizationHeader(..., customApi.key);   // ← 问题在这
+    }
+  }
+}
 ```
-HTTP 401 {"error":"Unauthorized: Please make sure you're using the latest version of Cline and re-authenticate your Cline account."}
-```
 
-| 可能 | 怎么确认 |
-|---|---|
-| 用错凭据类型 | 必须用 Settings → API Keys 里生成的 **API key**，不能用登录插件时的账号 auth token |
-| 额度用尽 | 去 app.cline.bot 看用量。**撞额度时 Cline 返回的也是这个 401，不是 429** |
-| key 被撤销 | 重新生成一个 |
+酒馆后端对 `custom` 源**只看 `custom_url` + `custom_include_headers`** 决定送什么凭据，
+`proxy_password` 那条路对 custom 不起作用。而它替我们拼出来的那份 Authorization 头，Cline 不认。
 
-**但这三种都不是唯一可能。** 实测踩过的第四个原因是：**酒馆转发这条链上送的凭据与面板里填的不是同一个值**。判断方法见下。
+**现在的做法：显式传 `custom_include_headers`，让酒馆原样合并。** 两个要点：
 
-> 记录一次误判：曾经因为「同一个 key 前一刻全 200、后一刻全 401」就断定是额度限制。
-> 后来发现同一个 key 在直连探针里始终 200，而扩展里始终 401 —— 那就是转发环节的问题，与额度无关。
-> **不要用「时间上挨着」推因果。**
+1. **不能再同时传 `key`** —— 否则 `proxy_password` 也会被设上，行为不可预期。测试里钉了一条断言。
+2. **值只放裸 key** —— TavernHelper 会自己拼成 `` `Bearer ${key}` ``。我在值里带了 `Bearer`，
+   会变成 `Bearer Bearer sk_...`。这条是测试抓出来的。
+
+> 排查过程中另外三个被证伪的假设，一并留着免得重走：
+> - **不是额度**。曾经因为「同一个 key 前一刻全 200、后一刻全 401」就断定是额度限制。
+>   后来同一个 key 在直连探针里始终 200、在扩展里始终 401 —— 与额度无关。
+>   **不要用时间相邻推因果。**
+> - **不是 key 类型**，也不是账号问题。直连探针一开始就证明了这个 key 可用。
+> - **不是模型名**。`cline-pass/deepseek-v4-flash` 与 `cline-pass/deepseek-v4.1-flash` 都能通。
 
 ### 怎么把「上游的问题」和「酒馆转发的问题」分开
 
@@ -351,18 +376,7 @@ $env:AW_KEY='你的key'
 node probe-endpoint.mjs --model cline-pass/deepseek-v4-flash
 ```
 
-然后点面板里的 **「换渠道诊断」**，它会用**面板里 ② 的实际配置**、按两种请求形状并排打同一个端点：
-
-| 形状 | 怎么送凭据 |
-|---|---|
-| A（本扩展现在用的） | `custom_api.key` → TavernHelper 落到 `reverse_proxy` + `proxy_password`，由酒馆按厂商分支设请求头 |
-| B（织幕用的） | 顶层 `custom_include_headers` 直接给酒馆一份请求头 YAML，酒馆只合并，不依赖厂商分支 |
-
-| 结果 | 含义 |
-|---|---|
-| A 通、B 通 | 面板这套配置没问题 → 去看扩展**实发**的那次请求（「查看实际请求体」） |
-| A 不通、B 通 | `custom_api.key` 这条路解析有问题 → 改用形状 B |
-| 两个都不通 | 酒馆这条链路确实不接受这个密钥 |
+然后点面板里的 **「换渠道诊断」**，它会用面板里 ② 的实际配置，并排打两种形状（见上表）。
 
 ### 2. 非流式响应多包了一层 `data`，酒馆解析不到正文
 
