@@ -7,8 +7,8 @@
  * 同时挂到 window.awDiagnose() / window.awProbe()，平板外接键盘时可直接调。
  */
 
-import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.6';
-import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.6';
+import { log, setDiagOutput, VERSION } from './ui/panel.js?v=0.8.7';
+import { describeMenuContainer, isMenuItemMounted } from './ui/menu.js?v=0.8.7';
 
 /** 用于自检的独立命名空间，不占用扩展自己的设置 */
 const DIAG_NS = 'agent_writer_diag';
@@ -650,7 +650,7 @@ export async function showLastRequests() {
 
     let snapshot;
     try {
-        const mod = await import('./pipeline.js?v=0.8.6');
+        const mod = await import('./pipeline.js?v=0.8.7');
         snapshot = mod.getLastRequests?.();
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -880,7 +880,7 @@ export async function probeChannel(apiUrl, key, model, useStream = false) {
     }
 
     say('=== 判断 ===');
-    say('形状 A 是 0.8.6 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
+    say('形状 A 是 0.8.7 之前的旧做法，形状 B 是现在用的 —— 所以「A 不通、B 通」是预期结果。');
     say('');
     if (okB) {
         if (okA) {
@@ -918,7 +918,7 @@ export async function dumpChannelPlan(settings) {
 
     let buildCustomApi;
     try {
-        const mod = await import('./tavern.js?v=0.8.6');
+        const mod = await import('./tavern.js?v=0.8.7');
         buildCustomApi = mod.buildCustomApi;
     } catch (e) {
         setDiagOutput(`读取失败: ${e?.message}`);
@@ -991,7 +991,7 @@ export async function dumpChannelPlan(settings) {
             out.push('');
         }
         if (api.key !== undefined) {
-            out.push('⚠ 仍在传 custom_api.key —— 0.8.6 起应该走 custom_include_headers。');
+            out.push('⚠ 仍在传 custom_api.key —— 0.8.7 起应该走 custom_include_headers。');
             out.push('');
         }
     }
@@ -1008,6 +1008,151 @@ export async function dumpChannelPlan(settings) {
     return text;
 }
 
+/**
+ * 用**面板里真实的参数**复现一次 ② 的请求。
+ *
+ * 为什么需要它：`probeChannel` 用的是它自己编的参数（temperature 0.3、
+ * max_tokens 32/100），而那和实跑的值可能差很远（实测面板里是 0.9 / 50000）。
+ * 拿近似值测出来的「通」，不能证明实跑会通 —— 上游完全可能因为
+ * max_tokens 超限之类的理由拒绝，而各家对这类拒绝的报错文案又很不一样。
+ *
+ * 所以这里严格照抄实跑：同一个 custom_api、同一组 bodyFields、同一个 useStream。
+ *
+ * @param {object} settings 完整设置（含 critic / final）
+ */
+export async function probeExact(settings) {
+    const context = ctx();
+    if (!context) {
+        setDiagOutput('getContext() 不可用。');
+        return null;
+    }
+
+    const out = [];
+    const say = (s) => { out.push(s); setDiagOutput(out.join('\n')); };
+
+    const mask = (v) => {
+        const s = String(v ?? '');
+        if (!s) return '(空)';
+        return s.length <= 12 ? `${s.slice(0, 3)}…${s.slice(-2)}（${s.length}）` : `${s.slice(0, 6)}…${s.slice(-4)}（${s.length}）`;
+    };
+
+    let buildCustomApi;
+    try {
+        ({ buildCustomApi } = await import('./tavern.js?v=0.8.7'));
+    } catch (e) {
+        setDiagOutput(`读取失败: ${e?.message}`);
+        return null;
+    }
+
+    const stage = settings?.critic;
+    if (!stage) {
+        setDiagOutput('读不到 ② 的设置。');
+        return null;
+    }
+
+    const customApi = buildCustomApi(stage);
+    const bodyFields = stage.bodyFields ?? {};
+    const useStream = stage.useStream !== false;
+
+    say('=== 用真实参数复现 ② 的请求 ===');
+    say('');
+    say(`API 地址     ${customApi.apiurl ?? '(用当前连接)'}`);
+    say(`模型         ${customApi.model ?? '(不覆盖)'}`);
+    say(`密钥         ${mask(stage.apiKey)}`);
+    say(`temperature  ${customApi.temperature ?? '(不传)'}`);
+    say(`max_tokens   ${customApi.max_tokens ?? '(不传)'}`);
+    say(`流式         ${useStream ? '开' : '关'}`);
+    say(`附加字段     ${Object.keys(bodyFields).length ? JSON.stringify(bodyFields) : '{}（空）'}`);
+    say('');
+
+    // 严格照抄 buildCustomApi 的产出 + 附加字段，只替掉 messages
+    const body = {
+        ...customApi,
+        messages: [{ role: 'user', content: 'Say OK' }],
+        stream: useStream,
+        chat_completion_source: 'custom',
+        custom_url: customApi.apiurl,
+        use_sysprompt: false,
+        ...bodyFields,
+    };
+    // key 已经在 custom_include_headers 里了，这里绝不能带 —— 带了就退回旧做法
+    delete body.key;
+
+    say('发出的 body 顶层字段：');
+    say('  ' + Object.keys(body).join(', '));
+    say('');
+
+    return await sendAndReport(context, body, say, out);
+}
+
+/**
+ * 把 body 发给酒馆后端并如实报告结果。
+ *
+ * 之所以要「如实」：上游的拒绝理由和 HTTP 状态码经常对不上
+ * （Cline 就是撞额度也回 401），所以状态码和响应体必须都打出来，
+ * 不能只凭状态码下结论。
+ */
+async function sendAndReport(context, body, say, out) {
+    try {
+        const resp = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: context.getRequestHeaders?.() ?? { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const text = await resp.text();
+        say(`HTTP ${resp.status}`);
+        say('');
+
+        let parsed = null;
+        try { parsed = JSON.parse(text); } catch { /* 可能是 SSE 或纯文本 */ }
+
+        if (parsed?.error) {
+            const msg = typeof parsed.error === 'object'
+                ? (parsed.error.message ?? JSON.stringify(parsed.error))
+                : String(parsed.error);
+            say('✘ 上游/酒馆报错：');
+            say('  ' + msg);
+        } else if (/^\s*data:/m.test(text)) {
+            const lines = text.split('\n').filter((l) => l.startsWith('data:'));
+            const done = lines.some((l) => l.includes('[DONE]'));
+            let chars = 0;
+            for (const line of lines) {
+                if (line.includes('[DONE]')) continue;
+                let j = null;
+                try { j = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                chars += String((j?.data ?? j)?.choices?.[0]?.delta?.content ?? '').length;
+            }
+            say(`✔ 流式成功：分片 ${lines.length} 个，正文 ${chars} 字${done ? '，收到 [DONE]' : ''}`);
+        } else if (parsed) {
+            const inner = parsed?.data ?? parsed;
+            const content = inner?.choices?.[0]?.message?.content ?? inner?.choices?.[0]?.text ?? parsed?.content ?? '';
+            if (String(content).trim()) {
+                say(`✔ 成功：${JSON.stringify(String(content).slice(0, 80))}`);
+            } else {
+                say('△ 通了但没正文。原始响应前 300 字：');
+                say('  ' + text.slice(0, 300));
+            }
+        } else {
+            say('响应不是 JSON，前 300 字：');
+            say('  ' + text.slice(0, 300));
+        }
+    } catch (e) {
+        say(`抛错: ${e?.message}${e?.cause ? ` / cause: ${e?.cause?.message ?? e.cause}` : ''}`);
+    }
+
+    say('');
+    say('=== 判断 ===');
+    say('  · 这里 200、但实跑 401 → 差别只剩「走不走酒馆助手的 generate()」，');
+    say('    那就得看「查看实际请求体」里实发的那份 generate_data。');
+    say('  · 这里也 401 → 同一组参数就能复现，与酒馆助手那层无关，');
+    say('    是这组参数（最可能是 max_tokens）或这个 key 此刻的状态。');
+
+    const text = out.join('\n');
+    setDiagOutput(text);
+    log('真实参数复现完成');
+    return text;
+}
+
 /** 挂到 window，方便不开面板直接调用 */
 export function exposeGlobals() {
     globalThis.awDiagnose = diagnose;
@@ -1017,4 +1162,5 @@ export function exposeGlobals() {
     globalThis.awLastRequests = showLastRequests;
     globalThis.awProbeChannel = probeChannel;
     globalThis.awChannelPlan = dumpChannelPlan;
+    globalThis.awProbeExact = probeExact;
 }
