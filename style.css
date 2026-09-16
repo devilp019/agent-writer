@@ -559,6 +559,12 @@
     color: var(--aw-text);
 }
 
+/* 存档名字后面的时间，弱一点，别抢名字的注意力 */
+.aw-snap-at {
+    font-weight: 400;
+    color: var(--aw-text-faint);
+}
+
 .aw-snap-actions {
     display: flex;
     gap: 6px;

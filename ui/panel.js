@@ -5,7 +5,7 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.8.27';
+import { demoState } from '../state.js?v=0.9.0';
 
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
@@ -338,7 +338,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.8.27';
+export const VERSION = '0.9.0';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -476,45 +476,57 @@ export function setRunning(busy, label) {
 }
 
 // ---------------------------------------------------------------------------
-// 版本历史
+// 存档（参数 / 提示词分开存）
 // ---------------------------------------------------------------------------
 
 /**
- * 画快照列表。
+ * 画一边的存档列表。
  *
- * 每条都要回答一个问题：**「这份和现在差在哪」** —— 那才是决定要不要
- * 恢复的依据。差了什么由 mountOptions.getHistoryDiff 提供（它同时知道
- * 快照和当前设置）。
+ * 每条要回答的问题：**「这份和现在差在哪」** —— 那才是决定要不要应用它的
+ * 依据。差异由 mountOptions.archiveDiff 提供（它同时知道存档和当前设置）。
+ *
+ * @param {'params'|'prompts'} kind
  */
-export function renderHistoryList() {
-    const box = document.getElementById('aw-snap-list');
-    const countEl = document.getElementById('aw-snap-count');
+export function renderArchiveList(kind) {
+    const box = document.getElementById(`aw-arch-${kind}-list`);
+    const appliedEl = document.getElementById(`aw-arch-${kind}-applied`);
     if (!box) return;
 
-    const items = mountOptions.listHistory?.() ?? [];
+    const items = mountOptions.listArchives?.(kind) ?? [];
+    const applied = mountOptions.appliedArchive?.(kind) ?? null;
 
-    if (countEl) {
-        countEl.textContent = items.length ? `共 ${items.length} 份` : '';
+    if (appliedEl) {
+        // 光说「应用了哪个」不够 —— 还得说「你有没有在它基础上又改过」
+        if (!applied?.name) {
+            appliedEl.textContent = '';
+        } else if (applied.differs) {
+            appliedEl.textContent = `当前基于「${applied.name}」，但已经被改过了`;
+        } else {
+            appliedEl.textContent = `当前正是「${applied.name}」`;
+        }
     }
 
     if (items.length === 0) {
-        box.innerHTML = '<p class="aw-hint">还没有任何快照。改一下设置，或者点上面的「保存快照」。</p>';
+        box.innerHTML = '<p class="aw-hint">还没有存档。调好之后在上面起个名字，点「存为新版本」。</p>';
         return;
     }
 
     box.innerHTML = items.map((item) => {
-        const diff = mountOptions.historyDiff?.(item) ?? [];
-        const diffHtml = diff.length === 0
-            ? '<em class="aw-snap-same">和当前设置一样</em>'
+        const diff = mountOptions.archiveDiff?.(kind, item.id) ?? [];
+        const same = diff.length === 0;
+        const diffHtml = same
+            ? '<em class="aw-snap-same">和当前完全一致</em>'
             : `<ul class="aw-snap-diff">${diff.slice(0, 8).map((d) => `<li>${esc(d)}</li>`).join('')}</ul>`;
         const more = diff.length > 8 ? `<em class="aw-snap-same">…还有 ${diff.length - 8} 处</em>` : '';
 
         return `<div class="aw-snap" data-id="${esc(item.id)}">
             <div class="aw-snap-head">
-                <span class="aw-snap-when">${esc(item.when)}</span>
+                <span class="aw-snap-when">${esc(item.name)}<span class="aw-snap-at">${esc(item.when)}</span></span>
                 <span class="aw-snap-actions">
-                    <button class="aw-btn aw-snap-restore" data-id="${esc(item.id)}">恢复这一份</button>
-                    <button class="aw-btn aw-btn-danger aw-snap-del" data-id="${esc(item.id)}">删</button>
+                    <button class="aw-btn aw-btn-primary aw-arch-apply" data-id="${esc(item.id)}">${same ? '应用' : '应用…'}</button>
+                    <button class="aw-btn aw-arch-overwrite" data-id="${esc(item.id)}" title="用当前的内容覆盖这一份">用当前覆盖</button>
+                    <button class="aw-btn aw-arch-rename" data-id="${esc(item.id)}">改名</button>
+                    <button class="aw-btn aw-btn-danger aw-arch-del" data-id="${esc(item.id)}">删</button>
                 </span>
             </div>
             ${diffHtml}${more}
@@ -526,9 +538,10 @@ export function renderHistoryList() {
     }).join('');
 }
 
-export function setHistoryCount(text) {
-    const countEl = document.getElementById('aw-snap-count');
-    if (countEl) countEl.textContent = text ?? '';
+/** 两边一起重画 */
+export function renderAllArchives() {
+    renderArchiveList('params');
+    renderArchiveList('prompts');
 }
 
 // ---------------------------------------------------------------------------
@@ -583,39 +596,89 @@ function bindEvents(el) {
         mountOptions.onStop?.();
     });
 
-    // 版本历史。列表是动态画的，所以恢复/删除走事件委托 ——
+    // 存档。列表是动态画的，所以应用/覆盖/改名/删都走事件委托 ——
     // 每次重画之后不需要重新挂监听。
-    el.querySelector('#aw-snap-save')?.addEventListener('click', () => {
-        const labelBox = el.querySelector('#aw-snap-label');
-        const label = String(labelBox?.value ?? '').trim();
-        const ok = mountOptions.saveHistory?.(label);
-        if (ok && labelBox) labelBox.value = '';
-        renderHistoryList();
-    });
+    for (const kind of ['params', 'prompts']) {
+        el.querySelector(`#aw-arch-${kind}-save`)?.addEventListener('click', () => {
+            const nameBox = el.querySelector(`#aw-arch-${kind}-name`);
+            const name = String(nameBox?.value ?? '').trim();
+            const result = mountOptions.saveArchive?.(kind, name) ?? {};
 
-    el.querySelector('#aw-snap-refresh')?.addEventListener('click', () => {
-        renderHistoryList();
-    });
+            // 重名：问一句要不要覆盖，而不是偷偷覆盖或者直接失败
+            if (result.needsOverwrite) {
+                const yes = globalThis.confirm?.(`已经有一个叫「${name}」的存档了，用当前内容覆盖它吗？`);
+                if (yes) {
+                    mountOptions.saveArchive?.(kind, name, { overwrite: true });
+                    if (nameBox) nameBox.value = '';
+                }
+            } else if (result.ok && nameBox) {
+                nameBox.value = '';
+            }
+            renderArchiveList(kind);
+        });
 
-    el.querySelector('#aw-snap-clear')?.addEventListener('click', () => {
-        mountOptions.clearHistory?.();
-        renderHistoryList();
-    });
+        el.querySelector(`#aw-arch-${kind}-list`)?.addEventListener('click', (event) => {
+            const pick = (cls) => event.target.closest?.(cls)?.dataset?.id ?? null;
 
-    el.querySelector('#aw-snap-list')?.addEventListener('click', (event) => {
-        const restoreBtn = event.target.closest?.('.aw-snap-restore');
-        if (restoreBtn) {
-            const id = restoreBtn.dataset.id;
-            mountOptions.restoreHistory?.(id);
-            renderHistoryList();
-            return;
-        }
-        const delBtn = event.target.closest?.('.aw-snap-del');
-        if (delBtn) {
-            mountOptions.deleteHistory?.(delBtn.dataset.id);
-            renderHistoryList();
-        }
-    });
+            const applyId = pick('.aw-arch-apply');
+            if (applyId) {
+                // 确认放在这里而不是 index.js：面板本来就已经算出了差异
+                // （列表上就显示着），再让下面重算一遍容易两边说法不一致。
+                // 覆盖 / 改名 / 删也都在这一层确认，保持一致。
+                const diff = mountOptions.archiveDiff?.(kind, applyId) ?? [];
+                const name = event.target.closest('.aw-snap')
+                    ?.querySelector('.aw-snap-when')?.textContent ?? '这一份';
+
+                if (diff.length === 0) {
+                    // 已经就是这个，不用打扰
+                    mountOptions.applyArchive?.(kind, applyId);
+                    renderArchiveList(kind);
+                    return;
+                }
+
+                const label = kind === 'prompts' ? '提示词' : '参数';
+                const yes = globalThis.confirm?.(
+                    `应用${label}版本「${name}」？\n\n`
+                    + `当前和它有 ${diff.length} 处不同，会被覆盖：\n\n`
+                    + diff.slice(0, 10).map((d) => `· ${d}`).join('\n')
+                    + (diff.length > 10 ? `\n…还有 ${diff.length - 10} 处` : ''),
+                );
+                if (yes) mountOptions.applyArchive?.(kind, applyId);
+                renderArchiveList(kind);
+                return;
+            }
+
+            const overId = pick('.aw-arch-overwrite');
+            if (overId) {
+                const name = event.target.closest('.aw-snap')?.querySelector('.aw-snap-when')?.textContent ?? '这一份';
+                if (globalThis.confirm?.(`用当前的${kind === 'prompts' ? '提示词' : '参数'}覆盖「${name}」？覆盖后没法还原。`)) {
+                    mountOptions.overwriteArchive?.(kind, overId);
+                }
+                renderArchiveList(kind);
+                return;
+            }
+
+            const renameId = pick('.aw-arch-rename');
+            if (renameId) {
+                const item = (mountOptions.listArchives?.(kind) ?? []).find((x) => x.id === renameId);
+                const next = globalThis.prompt?.('改成什么名字？', item?.name ?? '');
+                if (next !== null && next !== undefined) {
+                    mountOptions.renameArchive?.(kind, renameId, next);
+                }
+                renderArchiveList(kind);
+                return;
+            }
+
+            const delId = pick('.aw-arch-del');
+            if (delId) {
+                const item = (mountOptions.listArchives?.(kind) ?? []).find((x) => x.id === delId);
+                if (globalThis.confirm?.(`删掉存档「${item?.name ?? ''}」？删了就没了。`)) {
+                    mountOptions.deleteArchive?.(kind, delId);
+                }
+                renderArchiveList(kind);
+            }
+        });
+    }
 
     // 自检与连通性测试由 index.js 注入，避免 panel 依赖 diagnostics
     el.querySelector('#aw-diag-run')?.addEventListener('click', () => {
@@ -1009,29 +1072,33 @@ const PANEL_HTML = `
 
         <section class="aw-tab-panel" data-panel="history" hidden>
             <div class="aw-note">
-                设置现在是**改一下就自动存**的 —— 方便，但手滑了就没法回头。<br>
-                这里给你两层后悔药：<b>自动快照</b>在每次改动**之前**留一份旧值；
-                <b>手动快照</b>是你自己打的时间点。<br>
-                <b>恢复之前会自动再存一份当前值</b>，所以恢复错了还能再恢复回来。
+                当前这一份设置照旧**改一下就自动保存**，不用管。<br>
+                想留住某一份，就把它存成**有名字的存档** —— 存下来之后，
+                <b>当前怎么乱改都不会动到它</b>。想回到哪一份，点「应用」。<br>
+                <b>参数和提示词分开存</b>：可以几套参数配几套提示词混着用，
+                换参数不会顺手把你正在写的提示词也换掉。
             </div>
 
             <div class="aw-card">
-                <div class="aw-card-title">存一份快照</div>
-                <p class="aw-hint">给这次留个名字（可留空）。以后列表里靠它认出来。</p>
+                <div class="aw-card-title">参数存档</div>
+                <p class="aw-hint">槽位名、渠道、密钥、模型、温度、附加请求体、流式开关。</p>
                 <div class="aw-row">
-                    <input type="text" id="aw-snap-label" placeholder="例如：调好的温度 + 提示词" style="flex:1;min-width:120px;">
-                    <button id="aw-snap-save" class="aw-btn aw-btn-primary">保存快照</button>
+                    <input type="text" id="aw-arch-params-name" placeholder="给这套参数起个名字，例如：② Cline 开思考" style="flex:1;min-width:120px;">
+                    <button id="aw-arch-params-save" class="aw-btn aw-btn-primary">存为新版本</button>
                 </div>
-                <div class="aw-row">
-                    <button id="aw-snap-refresh" class="aw-btn">刷新列表</button>
-                    <button id="aw-snap-clear" class="aw-btn aw-btn-danger">清空全部历史</button>
-                    <span class="aw-stat" id="aw-snap-count"></span>
-                </div>
+                <div class="aw-row"><span class="aw-stat" id="aw-arch-params-applied"></span></div>
+                <div id="aw-arch-params-list" class="aw-snap-list"></div>
             </div>
 
             <div class="aw-card">
-                <div class="aw-card-title">历史</div>
-                <div id="aw-snap-list" class="aw-snap-list"></div>
+                <div class="aw-card-title">提示词存档</div>
+                <p class="aw-hint">② 校验提示词 + ③ 改写提示词，两份一起存。</p>
+                <div class="aw-row">
+                    <input type="text" id="aw-arch-prompts-name" placeholder="给这套提示词起个名字，例如：严格版" style="flex:1;min-width:120px;">
+                    <button id="aw-arch-prompts-save" class="aw-btn aw-btn-primary">存为新版本</button>
+                </div>
+                <div class="aw-row"><span class="aw-stat" id="aw-arch-prompts-applied"></span></div>
+                <div id="aw-arch-prompts-list" class="aw-snap-list"></div>
             </div>
         </section>
 

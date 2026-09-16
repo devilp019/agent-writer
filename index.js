@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.8.27';
+const VERSION = '0.9.0';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.8.27';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.8.27';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.8.27';
+import { setState, setDemoHandler, idleState } from './state.js?v=0.9.0';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.9.0';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.9.0';
 import {
     mountPanel,
     unmountPanel,
@@ -27,34 +27,36 @@ import {
     clearOutputs,
     setRunning as setPanelRunning,
     refreshPrompts,
-    renderHistoryList,
+    renderAllArchives,
+    renderArchiveList,
     renderStageCards,
     fillPromptEditors,
-} from './ui/panel.js?v=0.8.27';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.8.27';
+} from './ui/panel.js?v=0.9.0';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.9.0';
 import {
     getSettings,
     saveSettings,
-    onSettingsChange,
     DEFAULT_CRITIC_PROMPT,
     DEFAULT_REWRITE_PROMPT,
-} from './config.js?v=0.8.27';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.8.27';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.8.27';
-import { patchFetch } from './stream-hook.js?v=0.8.27';
+} from './config.js?v=0.9.0';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.9.0';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.9.0';
+import { patchFetch } from './stream-hook.js?v=0.9.0';
 import {
-    listSnapshots,
-    pushSnapshot,
-    deleteSnapshot,
-    clearSnapshots,
-    restoreSnapshot,
-    diffSettings,
-    describeSnapshot,
-    pickSnapshotData,
-    markBaseline,
-    noteChange,
-} from './history.js?v=0.8.27';
-import * as notice from './notice.js?v=0.8.27';
+    listArchives,
+    getArchive,
+    saveArchive,
+    overwriteArchive,
+    renameArchive,
+    deleteArchive,
+    applyArchive,
+    diffArchive,
+    driftFromApplied,
+    summarizeArchive,
+    formatTime,
+    KIND_LABELS,
+} from './archives.js?v=0.9.0';
+import * as notice from './notice.js?v=0.9.0';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -400,15 +402,10 @@ function startUI() {
         checkTavernHelper(settings);
         recoverSlotsOnBoot(settings);
 
-        // 版本历史：先把现在这一份当基准，之后每次改动都会把「改动之前」
-        // 存下来。挂在 saveSettings 的通知上，所以不管从哪条路改（面板、
-        // 以后的其它入口）都盖得到。
-        markBaseline();
-        onSettingsChange((reason) => {
-            // 写历史自己也会走一次 saveSettings，那不是用户改了设置
-            if (reason === 'history') return;
-            noteChange('auto');
-        });
+        // 注意：这里**没有**「改动前自动存快照」那套了。
+        // 现在的模型是：当前这一份照旧自动保存，想留住哪一份就手动存成
+        // 有名字的存档（「版本」页）。存档不受当前乱改影响 —— 那才是
+        // 真正管用的防误触，而不是一条随时会被上限挤掉的时间线。
 
         // 两个都没成，说明环境本身有问题，别让用户对着空白界面猜
         if (!fabOk && !menuOk) {
@@ -512,39 +509,9 @@ async function recoverSlotsOnBoot(settings) {
 }
 
 /**
- * 把快照里的内容摊成人能看的文本。
+ * 应用存档之后，把面板上的控件全部刷成新值。
  *
- * 只给「这份里存了什么」那个折叠框用 —— 差异列表已经答了「和现在差在哪」，
- * 这里答的是「这份到底是什么」。
- */
-function summarizeSnapshotData(data) {
-    if (!data || typeof data !== 'object') return '(空)';
-    const lines = [];
-    lines.push(`自动模式：${data.auto ? '开' : '关'}`);
-    lines.push(`总开关：${data.enabled === false ? '停用' : '启用'}`);
-
-    for (const [stage, title] of [['critic', '② 校验'], ['final', '③ 改写']]) {
-        const s = data[stage];
-        if (!s) continue;
-        lines.push('');
-        lines.push(`── ${title} ──`);
-        lines.push(`槽位名：${s.slotName || '(未填)'}`);
-        lines.push(`渠道：${s.apiUrl ? s.apiUrl : (s.proxyPreset ? `代理预设 ${s.proxyPreset}` : '用当前连接')}`);
-        lines.push(`密钥：${s.apiKey ? `已设置（${String(s.apiKey).slice(0, 4)}…，${String(s.apiKey).length} 位）` : '(空)'}`);
-        lines.push(`模型：${s.model || '(不覆盖)'}`);
-        lines.push(`温度 / 最大长度：${s.temperature} / ${s.maxTokens}`);
-        lines.push(`流式：${s.useStream === false ? '关' : '开'}`);
-        lines.push(`附加请求体：${(s.bodyFieldsRaw ?? '').trim() || '(空)'}`);
-        lines.push(`提示词：${(s.systemPrompt ?? '').length} 字`);
-        lines.push(`  开头：${String(s.systemPrompt ?? '').slice(0, 60).replace(/\n/g, ' ')}…`);
-    }
-    return lines.join('\n');
-}
-
-/**
- * 恢复快照之后，把面板上的控件全部刷成新值。
- *
- * 少了这一步，界面还显示着旧值 —— 你会以为恢复没生效，然后再点一次，
+ * 少了这一步，界面还显示着旧值 —— 你会以为没生效，然后再点一次，
  * 那就真的乱了。
  */
 function refreshAllControls(settings) {
@@ -610,74 +577,112 @@ function mountPanelOnce() {
             },
             onPromptRestore: () => {
                 // 「恢复默认提示词」是这个面板上最容易后悔的一下 ——
-                // 手动改了很久的提示词会被一次覆盖掉，而且那一下常常是误触。
-                // 所以先**立刻**存一份当前的（不走防抖），再覆盖。
-                pushSnapshot({ reason: 'before-reset', label: '恢复默认提示词之前' });
-
+                // 手动改了很久的提示词会被一次覆盖掉，而且常常是误触。
+                // 所以先确认一下，并给一条退路（存一份存到「版本」页）。
                 const s = getSettings();
+                const changed = s.critic.systemPrompt !== DEFAULT_CRITIC_PROMPT
+                    || s.final.systemPrompt !== DEFAULT_REWRITE_PROMPT;
+                if (!changed) {
+                    log('提示词本来就是默认的，没动');
+                    return;
+                }
+                const yes = globalThis.confirm?.(
+                    '把两段提示词都恢复成默认？\n\n'
+                    + '当前这两段会被覆盖。想留的话先取消，到「版本」页把它们存成一个带名字的存档。\n\n'
+                    + '（确认后会自动把当前这份存成「恢复默认前」的存档，还能找回）',
+                );
+                if (!yes) {
+                    log('已取消恢复默认提示词');
+                    return;
+                }
+
+                saveArchive('prompts', '恢复默认前', { overwrite: true });
+
                 s.critic.systemPrompt = DEFAULT_CRITIC_PROMPT;
                 s.final.systemPrompt = DEFAULT_REWRITE_PROMPT;
                 saveSettings({ immediate: true });
-                markBaseline();
 
                 const panel = document.getElementById('aw-panel');
                 const critic = panel?.querySelector('#aw-critic-prompt');
                 const rewrite = panel?.querySelector('#aw-rewrite-prompt');
                 if (critic) critic.value = DEFAULT_CRITIC_PROMPT;
                 if (rewrite) rewrite.value = DEFAULT_REWRITE_PROMPT;
-                log('已恢复默认提示词（改之前的样子已存进「版本」页，能回退）');
+                renderArchiveList('prompts');
+                log('已恢复默认提示词。当前这两段存成了「恢复默认前」，在「版本」页可以应用回来');
             },
-            // ---------- 版本历史 ----------
-            listHistory: () => listSnapshots().map((item) => ({
+            // ---------- 存档（参数 / 提示词分开存） ----------
+            listArchives: (kind) => listArchives(kind).map((item) => ({
                 id: item.id,
-                when: describeSnapshot(item),
-                summary: summarizeSnapshotData(item.data),
-                // 「这份和现在差在哪」——注意方向：列出的是两份之间的差异，
-                // 点「恢复」之后你会从**现在**变成**这份**。
-                diff: diffSettings(item.data, pickSnapshotData(getSettings())),
+                name: item.name,
+                when: ` · ${formatTime(item.updatedAt ?? item.at)}`,
+                summary: summarizeArchive(kind, item),
             })),
-            historyDiff: (entry) => entry.diff ?? [],
-            saveHistory: (label) => {
-                const item = pushSnapshot({ reason: 'manual', label });
-                if (item) {
-                    log(`已存快照${label ? `「${label}」` : ''}`);
-                } else {
-                    log('当前设置和最新一份快照一样，没重复存');
+            archiveDiff: (kind, id) => diffArchive(kind, id),
+            appliedArchive: (kind) => driftFromApplied(kind),
+            saveArchive: (kind, name, options = {}) => {
+                const result = saveArchive(kind, name, options);
+                if (result.ok) {
+                    log(`已存${KIND_LABELS[kind]}版本「${name}」`);
+                    return { ok: true };
                 }
-                return !!item;
+                if (result.reason === 'exists') {
+                    // 让面板去问要不要覆盖 —— 这里不替用户决定
+                    return { ok: false, needsOverwrite: true };
+                }
+                log(`没存成：${result.reason}`);
+                return { ok: false };
             },
-            restoreHistory: (id) => {
-                const result = restoreSnapshot(id);
-                if (!result.ok) {
-                    log(`恢复失败：${result.error}`);
-                    return false;
+            overwriteArchive: (kind, id) => {
+                const result = overwriteArchive(kind, id);
+                log(result.ok
+                    ? `已用当前${KIND_LABELS[kind]}覆盖「${result.item.name}」`
+                    : `覆盖失败：${result.reason}`);
+            },
+            renameArchive: (kind, id, name) => {
+                const result = renameArchive(kind, id, name);
+                if (!result.ok) log(`改名失败：${result.reason}`);
+                else log(`已改名为「${result.item.name}」`);
+            },
+            deleteArchive: (kind, id) => {
+                const result = deleteArchive(kind, id);
+                log(result.ok ? '已删掉那份存档' : `删除失败：${result.reason}`);
+            },
+            applyArchive: (kind, id) => {
+                const item = getArchive(kind, id);
+                if (!item) {
+                    log('那份存档已经不在了');
+                    return;
                 }
-                // 恢复完必须把面板控件同步成新的值，否则界面还显示旧值，
+
+                // 确认由面板负责（它手上就有差异，列表上也显示着）。
+                // 这里只管照做 + 把界面同步好。
+                const diffCount = diffArchive(kind, id).length;
+                const result = applyArchive(kind, id);
+                if (!result.ok) {
+                    log(`应用失败：${result.reason}`);
+                    return;
+                }
+
+                // 应用完必须把面板控件同步成新值，否则界面还显示旧值，
                 // 你会以为没生效、然后再点一次
                 refreshAllControls(getSettings());
-                log(`已恢复到 ${describeSnapshot(result.applied)}`
-                    + (result.backup ? '（恢复前的样子也存了一份，能撤销）' : ''));
-                return true;
-            },
-            deleteHistory: (id) => {
-                log(deleteSnapshot(id) ? '已删掉那份快照' : '那份快照已经不在了');
-            },
-            clearHistory: () => {
-                clearSnapshots();
-                log('版本历史已清空');
+
+                log(diffCount === 0
+                    ? `当前${KIND_LABELS[kind]}已经就是「${item.name}」`
+                    : `已应用${KIND_LABELS[kind]}版本「${item.name}」（${diffCount} 处改动）`);
             },
             onBeforeShow: () => {
                 // 面板显示的提示词必须就是配置里那一份
                 refreshPrompts(getSettings());
-                // 版本列表也要重画：面板关着的那段时间可能改过设置
-                renderHistoryList();
+                // 存档列表也要重画：面板关着的那段时间可能改过设置
+                renderAllArchives();
             },
             onTabChange: (tab) => {
                 const s = getSettings();
                 s.ui = { ...s.ui, tab };
                 saveSettings();
                 // 切到「版本」页时重画一次 —— 列表要反映刚刚发生的改动
-                if (tab === 'history') renderHistoryList();
+                if (tab === 'history') renderAllArchives();
             },
         });
     } catch (err) {
@@ -696,7 +701,7 @@ function mountPanelOnce() {
         const autoBox = getAutoCheckbox();
         if (autoBox) autoBox.checked = !!settings.auto;
         setState(idleState(settings));
-        renderHistoryList();
+        renderAllArchives();
 
         log('提示：「参数」页可点「运行自检」；「输出」页看 ①②③ 的结果');
 
