@@ -29,7 +29,7 @@
  * 单独一个键，免得被 getSettings() 的深合并搅进来。
  */
 
-import { MODULE_NAME, getSettings, saveSettings, DEFAULT_SETTINGS } from './config.js?v=0.9.0';
+import { MODULE_NAME, getSettings, saveSettings, DEFAULT_SETTINGS } from './config.js?v=0.9.1';
 
 export const ARCHIVES_KEY = `${MODULE_NAME}_archives`;
 

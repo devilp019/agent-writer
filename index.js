@@ -10,11 +10,11 @@
 
 // 部署版本号。所有相对 import 都带上 ?v=<VERSION>：
 // 换版本时浏览器会当作新 URL 重新拉取，避免旧模块缓存和新代码混在一起。
-const VERSION = '0.9.0';
+const VERSION = '0.9.1';
 
-import { setState, setDemoHandler, idleState } from './state.js?v=0.9.0';
-import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.9.0';
-import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.9.0';
+import { setState, idleState } from './state.js?v=0.9.1';
+import { mountFab, unmountFab, resetFabPosition } from './ui/fab.js?v=0.9.1';
+import { mountMenuItem, unmountMenuItem } from './ui/menu.js?v=0.9.1';
 import {
     mountPanel,
     unmountPanel,
@@ -31,17 +31,17 @@ import {
     renderArchiveList,
     renderStageCards,
     fillPromptEditors,
-} from './ui/panel.js?v=0.9.0';
-import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.9.0';
+} from './ui/panel.js?v=0.9.1';
+import { diagnose, probe, exposeGlobals } from './diagnostics.js?v=0.9.1';
 import {
     getSettings,
     saveSettings,
     DEFAULT_CRITIC_PROMPT,
     DEFAULT_REWRITE_PROMPT,
-} from './config.js?v=0.9.0';
-import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.9.0';
-import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.9.0';
-import { patchFetch } from './stream-hook.js?v=0.9.0';
+} from './config.js?v=0.9.1';
+import { runPipeline, findLastAssistantIndex, extractReasoning, recoverSlots } from './pipeline.js?v=0.9.1';
+import { probeTavernHelper, getProxyPresets } from './tavern.js?v=0.9.1';
+import { patchFetch } from './stream-hook.js?v=0.9.1';
 import {
     listArchives,
     getArchive,
@@ -55,8 +55,8 @@ import {
     summarizeArchive,
     formatTime,
     KIND_LABELS,
-} from './archives.js?v=0.9.0';
-import * as notice from './notice.js?v=0.9.0';
+} from './archives.js?v=0.9.1';
+import * as notice from './notice.js?v=0.9.1';
 
 const MODULE_NAME = 'agent_writer';
 
@@ -375,7 +375,6 @@ function safeToggle() {
 function startUI() {
     const settings = getSettings();
     exposeGlobals();
-    setDemoHandler((state, detail) => setState(state, detail));
 
     if (!uiStarted) {
         uiStarted = true;
@@ -560,7 +559,6 @@ function mountPanelOnce() {
                 setState(idleState(s));
                 log(`自动模式：${auto ? '开' : '关'}`);
             },
-            onDemoState: (state, detail) => setState(state, detail),
             onRun: () => {
                 runPipelineNow('手动');
             },

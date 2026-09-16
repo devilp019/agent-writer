@@ -24,7 +24,7 @@ import {
     parseCritique,
     isClean,
     looksRunaway,
-} from './stages.js?v=0.9.0';
+} from './stages.js?v=0.9.1';
 import {
     injectSlot,
     restoreSlot,
@@ -34,8 +34,8 @@ import {
     makePayloadTag,
     takeLastBody,
     recoverSlots,
-} from './tavern.js?v=0.9.0';
-import { subscribeStream } from './stream-hook.js?v=0.9.0';
+} from './tavern.js?v=0.9.1';
+import { subscribeStream } from './stream-hook.js?v=0.9.1';
 
 function ctx() {
     return globalThis.SillyTavern?.getContext?.() ?? null;

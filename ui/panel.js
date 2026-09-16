@@ -5,8 +5,6 @@
  * 位置按设备存 localStorage，resize / 转屏后重新夹取。
  */
 
-import { demoState } from '../state.js?v=0.9.0';
-
 const PANEL_ID = 'aw-panel';
 const POS_KEY = 'aw_panel_pos_v1';
 const MARGIN = 12;
@@ -87,8 +85,8 @@ function stageFieldsHTML(stage, settings, proxyNames = []) {
         <label class="aw-field">
             <span>附加请求体字段（必须写能解析的 JSON）</span>
             <textarea id="${id('bodyfields')}" rows="4">${esc(bodyFieldsText(s))}</textarea>
-            <em class="aw-tip">这里的内容走 <code>custom_include_body</code>，酒馆后端会用 <code>mergeObjectWithYaml</code> <b>合并</b>进请求体 —— 它是合并而不是过滤，不认识的字段（<code>providerOptions</code> 这类）不会被丢掉，所以不需要什么「绕过解析」的技巧。<br><b>但必须写能解析的 JSON。</b>曾经流传「故意留个尾逗号能让酒馆跳过过滤」——<b>实测是反的</b>：解析失败时那个 <code>catch</code> 什么都不做，结果是<b>一个字段都加不上</b>（上游直接回 <code>Error parsing request</code>）。<br>DeepSeek 官方 API 的思考开关：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。<b>Cline 例外：</b>实测它把 <code>thinking</code> 和 <code>reasoning_effort</code> 都静默忽略（三种写法下思维链分片数 96 / 111 / 112，基本没变），关不掉。</em>
-            <em class="aw-tip">指向 Cline 时，<b>「流式」必须打开</b>：它的非流式响应会多包一层 <code>data</code>，酒馆解析不到正文，会得到「成功但返回为空」。</em>
+            <em class="aw-tip">思考开关写这里。<br>DeepSeek 官方：关 <code>{"thinking":{"type":"disabled"}}</code>，开 <code>{"thinking":{"type":"enabled"}}</code>。<br><b>Cline 关不掉</b> —— <code>thinking</code> 和 <code>reasoning_effort</code> 都被它静默忽略。<br><b>必须写能解析的 JSON</b>，写坏了字段会一个都加不上。</em>
+            <em class="aw-tip">指向 Cline 时<b>「流式」必须打开</b>：它的非流式响应多包一层 <code>data</code>，酒馆解析不到正文，会得到「成功但返回为空」。</em>
         </label>
 
         <div class="aw-grid">
@@ -338,7 +336,7 @@ function makeHeaderDraggable(el, handle) {
  * 否则会形成 index → panel → index 的循环依赖。
  * check-version.mjs 会核对两者一致。
  */
-export const VERSION = '0.9.0';
+export const VERSION = '0.9.1';
 
 export function log(message) {
     const time = new Date().toLocaleTimeString();
@@ -567,18 +565,6 @@ function bindEvents(el) {
 
     el.querySelector('#aw-log-clear')?.addEventListener('click', clearLog);
 
-    // 状态演示：确认三端动画表现
-    el.querySelectorAll('[data-state-demo]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            const state = btn.dataset.stateDemo;
-            log(`预览状态: ${state}`);
-            const detail = state === 'checking' ? { badge: '1620' } : state === 'error' ? { badge: '3' } : null;
-            // 先回 idle，保证连点同一个状态也能重新触发动画
-            mountOptions.onDemoState?.('idle', null);
-            mountOptions.onDemoState?.(state, detail);
-        });
-    });
-
     el.querySelector('#aw-auto')?.addEventListener('change', (event) => {
         // ⚠️ 必须走 mountOptions。这里曾经调的是一个裸的模块级变量
         // `onAutoChange`（L16 声明为 null 之后**再也没有被赋过值**），
@@ -680,24 +666,10 @@ function bindEvents(el) {
         });
     }
 
-    // 自检与连通性测试由 index.js 注入，避免 panel 依赖 diagnostics
-    el.querySelector('#aw-diag-run')?.addEventListener('click', () => {
-        window.awDiagnose?.();
-    });
-    el.querySelector('#aw-diag-probe')?.addEventListener('click', () => {
-        window.awProbe?.();
-    });
-    el.querySelector('#aw-diag-secret')?.addEventListener('click', () => {
-        window.awProbeSecret?.();
-    });
-    /**
-     * 点诊断按钮时现读面板里的两个阶段。
-     *
-     * 为什么不直接用 currentStageState：它靠 input/change 事件更新，
-     * 而那假设「事件一定触发过」。实测踩到过 —— 用户明明填了附加参数，
-     * 诊断里却显示 {}（空）。现从 DOM 读就没有这个假设，
-     * 代价只是多解析几次 JSON。
-     */
+    // 面板上不再摆诊断按钮了 —— 那排按钮是开发期用的，日常看着碍事。
+    // 诊断能力本身**没有删**：diagnostics.js 里那些函数照旧通过
+    // window.awXxx 暴露着（见 diagnostics.exposeGlobals），结果写进「日志」页。
+    // 用法见 README 的「出问题时」。
     const readStagesNow = () => {
         const base = { critic: {}, final: {} };
         return {
@@ -705,60 +677,8 @@ function bindEvents(el) {
             final: readStage(el, 'final', currentStageState?.final ?? base.final),
         };
     };
-
-    el.querySelector('#aw-diag-channel')?.addEventListener('click', () => {
-        // 用面板里 ② 的实际值（含流式开关）—— 这个诊断要验的就是「扩展配的那套」
-        const stage = readStagesNow().critic;
-        window.awProbeChannel?.(
-            stage.apiUrl,
-            stage.apiKey,
-            stage.model,
-            stage.useStream !== false,
-        );
-    });
-    el.querySelector('#aw-diag-requests')?.addEventListener('click', () => {
-        window.awLastRequests?.();
-    });
-    el.querySelector('#aw-diag-plan')?.addEventListener('click', () => {
-        // 不发请求，只把扩展实际会构造的 custom_api 打出来
-        window.awChannelPlan?.(readStagesNow());
-    });
-    el.querySelector('#aw-diag-exact')?.addEventListener('click', () => {
-        // 用面板里真实的 temperature / max_tokens / 附加字段复现 ② 的请求 ——
-        // 换渠道诊断用的是它自己编的参数，测不出「实跑才失败」这类问题。
-        window.awProbeExact?.(readStagesNow());
-    });
-    el.querySelector('#aw-diag-via-th')?.addEventListener('click', () => {
-        // 真正走 TavernHelper（和流水线同一个函数），并截获它发出的 generate_data。
-        // 前面反复「诊断通、实跑不通」，就是因为诊断一直绕过 TavernHelper。
-        window.awProbeViaTh?.(readStagesNow().critic);
-    });
-    el.querySelector('#aw-diag-snapshot')?.addEventListener('click', () => {
-        // 拍设置快照 / 与上一次对比。
-        // 用途：查「改某处设置会不会连带关掉正则」这类联动 —— 改前拍、改后拍。
-        window.awSnapshot?.();
-    });
-    el.querySelector('#aw-diag-watch')?.addEventListener('click', () => {
-        // 监听 20 秒，报告哪些流式事件真的发生了。
-        // 平板开控制台不方便，而「思维链为什么是空的」只能靠这个判断。
-        window.awWatchStream?.(20);
-    });
-    el.querySelector('#aw-diag-shape')?.addEventListener('click', () => {
-        const model = el.querySelector('#aw-diag-model')?.value ?? '';
-        window.awProbeShape?.(model);
-    });
-    el.querySelector('#aw-diag-copy')?.addEventListener('click', async () => {
-        const output = el.querySelector('#aw-diag-output');
-        if (!output?.value) return;
-        try {
-            await navigator.clipboard.writeText(output.value);
-            log('自检结果已复制到剪贴板');
-        } catch {
-            // 剪贴板 API 在非 HTTPS 下不可用，退回选中让用户手动复制
-            output.select();
-            log('剪贴板不可用，已选中文本，请手动复制');
-        }
-    });
+    // 给控制台用：awStages() 拿到面板里当前填的两阶段（含附加字段的解析结果）
+    window.awStages = readStagesNow;
 }
 
 /**
@@ -770,7 +690,6 @@ function bindEvents(el) {
  *
  * @param {object} options
  * @param {(auto: boolean) => void} [options.onAutoChange]
- * @param {(state: string, detail: object|null) => void} [options.onDemoState] 状态演示回调
  * @param {() => void} [options.onRun] 手动触发流水线
  * @param {() => void} [options.onStop]
  * @param {(stage: string, next: object) => void} [options.onStageChange]
@@ -779,9 +698,6 @@ function bindEvents(el) {
  * @returns {HTMLElement|null}
  */
 export function mountPanel(options = {}) {
-    if (!options.onDemoState) {
-        options.onDemoState = (state, detail) => demoState(state, detail);
-    }
     mountOptions = options;
 
     // 记下重建次数 —— 输出框「闪一下就不见了」多半就是重建导致的。
@@ -947,10 +863,22 @@ export function fillPromptEditors(el, settings) {
     }
 }
 
-/** 供 diagnostics 写入结果 */
+/**
+ * 诊断结果往哪儿写。
+ *
+ * 面板上原来有个专门的自检输出框，但那整张自检卡片已经撤掉了
+ * （开发期用的按钮，日常碍事）。所以现在写进「日志」页 ——
+ * 诊断能力一点没少，只是不再占着「参数」页。
+ */
 export function setDiagOutput(text) {
-    const el = document.getElementById('aw-diag-output');
-    if (el) el.value = text;
+    const body = String(text ?? '');
+    if (!body.trim()) return;
+
+    for (const line of body.split('\n')) {
+        log(line);
+    }
+    // 控制台也留一份，方便直接复制
+    console.log('[AgentWriter] ==== 诊断结果开始 ====\n' + body + '\n[AgentWriter] ==== 诊断结果结束 ====');
 }
 
 export function getAutoCheckbox() {
@@ -1010,49 +938,6 @@ const PANEL_HTML = `
                 <p class="aw-hint">按清单改稿，保住原稿文风 —— <b>这一阶段要关思考</b>。开思考会让它一边写一边盘算剧情，正文反而不能用。</p>
                 <div id="aw-fields-final"></div>
             </div>
-
-            <div class="aw-card">
-                <div class="aw-card-title">运行环境自检</div>
-                <p class="aw-hint">
-                    确认扩展装对了、酒馆 API 拿得到、连接配置能发请求。
-                    点「运行自检」后把结果截图发出来即可。
-                </p>
-                <div class="aw-row">
-                    <button id="aw-diag-run" class="aw-btn aw-btn-primary">运行自检</button>
-                    <button id="aw-diag-probe" class="aw-btn">测试当前连接配置</button>
-                    <button id="aw-diag-secret" class="aw-btn">密钥来源对照</button>
-                    <button id="aw-diag-copy" class="aw-btn">复制结果</button>
-                    <button id="aw-diag-requests" class="aw-btn">查看实际请求体</button>
-                    <button id="aw-diag-channel" class="aw-btn">换渠道诊断</button>
-                    <button id="aw-diag-plan" class="aw-btn">看扩展实际发什么</button>
-                    <button id="aw-diag-exact" class="aw-btn">用真实参数复现 ②</button>
-                    <button id="aw-diag-via-th" class="aw-btn">走酒馆助手跑一次（最接近实跑）</button>
-                    <button id="aw-diag-snapshot" class="aw-btn">拍设置快照 / 对比</button>
-                    <button id="aw-diag-watch" class="aw-btn">监听流式事件 20 秒</button>
-                </div>
-                <label class="aw-field">
-                    <span>请求体形状对照 —— 可填一个你确认能用的模型名（留空则用配置里的）</span>
-                    <input type="text" id="aw-diag-model" placeholder="例如 cline-pass/deepseek-v4.1-flash">
-                </label>
-                <div class="aw-row">
-                    <button id="aw-diag-shape" class="aw-btn">开始形状对照</button>
-                </div>
-                <textarea id="aw-diag-output" readonly rows="10" placeholder="尚未运行"></textarea>
-            </div>
-
-            <div class="aw-card">
-                <div class="aw-card-title">悬浮球状态演示</div>
-                <p class="aw-hint">点击可预览各状态下的动态效果，确认平板/手机上的表现。</p>
-                <div class="aw-row">
-                    <button class="aw-btn" data-state-demo="idle">待命</button>
-                    <button class="aw-btn" data-state-demo="drafting">草稿</button>
-                    <button class="aw-btn" data-state-demo="checking">校验</button>
-                    <button class="aw-btn" data-state-demo="rewriting">改写</button>
-                    <button class="aw-btn" data-state-demo="done">完成</button>
-                    <button class="aw-btn" data-state-demo="error">出错</button>
-                    <button class="aw-btn" data-state-demo="off">停用</button>
-                </div>
-            </div>
         </section>
 
         <section class="aw-tab-panel" data-panel="prompts" hidden>
@@ -1072,11 +957,9 @@ const PANEL_HTML = `
 
         <section class="aw-tab-panel" data-panel="history" hidden>
             <div class="aw-note">
-                当前这一份设置照旧**改一下就自动保存**，不用管。<br>
-                想留住某一份，就把它存成**有名字的存档** —— 存下来之后，
-                <b>当前怎么乱改都不会动到它</b>。想回到哪一份，点「应用」。<br>
-                <b>参数和提示词分开存</b>：可以几套参数配几套提示词混着用，
-                换参数不会顺手把你正在写的提示词也换掉。
+                当前这一份设置<b>改一下就自动保存</b>，不用管。<br>
+                想留住某一份，把它存成<b>有名字的存档</b> —— 存下来之后当前怎么改都不会动到它。<br>
+                <b>参数和提示词分开存</b>，可以几套参数配几套提示词混着用。
             </div>
 
             <div class="aw-card">
@@ -1113,7 +996,7 @@ const PANEL_HTML = `
                 <details class="aw-details">
                     <summary>思维链 <span class="aw-stat" id="aw-critic-reasoning-stats"></span></summary>
                     <textarea id="aw-critic-reasoning" rows="6" readonly class="aw-reasoning"></textarea>
-                    <em class="aw-tip">思维链直接从**上游流式响应**里读（扩展拦了酒馆打给 <code>/api/backends/chat-completions/generate</code> 的那次 <code>fetch</code>），和正文一样是实时的。<br>一直是空的话按顺序查：①「参数」页点「运行自检」，看<b>上游流式拦截</b>那几行的数字；② <code>chunks</code> 在涨但思维链是 0 ⇒ 该渠道根本没回 <code>reasoning_content</code> / <code>reasoning</code> 字段（例如思考是关的）。</em>
+                    <em class="aw-tip">思维链从上游流式响应里直接读，和正文一样是实时的。一直是空的话，多半是该渠道没回 <code>reasoning_content</code> 字段（比如思考是关的）。</em>
                 </details>
             </div>
             <div class="aw-card">
